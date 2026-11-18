@@ -461,6 +461,12 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/v1/_meta", a.meta)
 	// 快照查询：按模板 + 档位 + 时间范围透视出「终端 × 字段」的最新值。
 	mux.HandleFunc("GET /admin/v1/snapshot-query", a.snapshotQuery)
+	// 分析模块：能耗总览、时序趋势与同环比、用能异常与平衡诊断、数据质量、设备健康。
+	mux.HandleFunc("GET /admin/v1/analytics/overview", a.analyticsOverview)
+	mux.HandleFunc("GET /admin/v1/analytics/series", a.analyticsSeries)
+	mux.HandleFunc("GET /admin/v1/analytics/anomalies", a.analyticsAnomalies)
+	mux.HandleFunc("GET /admin/v1/analytics/quality", a.analyticsQuality)
+	mux.HandleFunc("GET /admin/v1/analytics/health", a.analyticsHealth)
 	mux.HandleFunc("GET /admin/v1/exceptions/{slot}", a.exceptionList)
 	mux.HandleFunc("GET /admin/v1/readonly/{slot}", a.readonlyList)
 	mux.HandleFunc("GET /admin/v1/raw-items", a.rawItems)

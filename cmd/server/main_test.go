@@ -40,7 +40,7 @@ func TestRoutes(t *testing.T) {
 	}
 
 	// 深链回退到 index.html（前端路由自己解析）。
-	for _, target := range []string{"/ui/e/terminals", "/ui/r/snapshot-second", "/ui/x/exception-events"} {
+	for _, target := range []string{"/ui/e/terminals", "/ui/r/snapshot-second", "/ui/x/exception-events", "/ui/a/trends"} {
 		rec = httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
 		if rec.Code != http.StatusOK {
