@@ -64,21 +64,27 @@ export function listPath(kind: ListKind, name: string): string {
   }
 }
 
-export interface ListResult {
-  rows: RowData[];
+export interface ListResult<T = RowData> {
+  rows: T[];
   meta: ListMeta;
   cursor?: CursorMeta;
 }
 
 /** 列表查询：分页/筛选/排序全部交给服务端（白名单在 Go 侧）。 */
-export async function fetchList(
+export async function fetchList<T = RowData>(
   kind: ListKind,
   name: string,
-  params: URLSearchParams,
+  params: URLSearchParams | Record<string, string | number>,
   signal?: AbortSignal,
-): Promise<ListResult> {
-  const suffix = params.toString();
-  const payload = await request<RowData[]>(`${listPath(kind, name)}${suffix ? `?${suffix}` : ''}`, {
+): Promise<ListResult<T>> {
+  const searchParams =
+    params instanceof URLSearchParams
+      ? params
+      : new URLSearchParams(
+          Object.entries(params).map(([k, v]) => [k, String(v)]),
+        );
+  const suffix = searchParams.toString();
+  const payload = await request<T[]>(`${listPath(kind, name)}${suffix ? `?${suffix}` : ''}`, {
     signal,
   });
   const meta = payload.meta;
@@ -264,4 +270,562 @@ export async function fetchOptions(
     { signal },
   );
   return Array.isArray(payload.data) ? payload.data : [];
+}
+
+// ── 分析模块 API ─────────────────────────────────────────────────────────────
+
+export type AnalyticsSource = 'raw' | 'hour' | 'day' | 'month' | 'year';
+export type AnalyticsMode = 'delta' | 'reading';
+export type AnalyticsCompare = 'none' | 'mom' | 'yoy';
+
+export interface AnalyticsPropertyMeta {
+  typeId: number;
+  typeName: string;
+  typeCode: string;
+  domainName?: string;
+  itemCode: string;
+  itemName: string;
+  valueType: string;
+  unit?: string;
+  precision?: number;
+  minValue?: number;
+  maxValue?: number;
+}
+
+export interface AnalyticsPoint {
+  time: string;
+  num?: number;
+  text?: string;
+  quality: number;
+  qualityReason?: string;
+  delta?: number;
+  rawDelta?: number;
+  rollback?: boolean;
+  spikeAnomaly?: boolean;
+  touPeriod?: 'sharp' | 'peak' | 'flat' | 'valley';
+}
+
+export interface AnalyticsTouBreakdown {
+  sharpUsage: number;
+  peakUsage: number;
+  flatUsage: number;
+  valleyUsage: number;
+}
+
+export interface AnalyticsSeriesStats {
+  count: number;
+  numericCount: number;
+  badQualityCount: number;
+  first?: number;
+  last?: number;
+  min?: number;
+  max?: number;
+  avg?: number;
+  sum?: number;
+  stdDev?: number;
+  delta?: number;
+  changeRate?: number;
+  usageSum?: number;
+  usageAvg?: number;
+  usageMax?: number;
+  usageMaxTime?: string;
+  spikeCount: number;
+  rollbackCount: number;
+  offHoursUsage?: number;
+  prevUsageSum?: number;
+  compareRate?: number;
+  touBreakdown?: AnalyticsTouBreakdown;
+}
+
+export interface AnalyticsTerminalSeries {
+  terminalId: string;
+  terminalName: string;
+  gatewayId: string;
+  online: boolean;
+  enabled: boolean;
+  stats: AnalyticsSeriesStats;
+  points: AnalyticsPoint[];
+}
+
+export interface AnalyticsFleetStats {
+  terminalCount: number;
+  totalPoints: number;
+  badQualityCount: number;
+  min?: number;
+  max?: number;
+  avg?: number;
+  totalUsage?: number;
+  prevTotalUsage?: number;
+  compareRate?: number;
+  spikeCount: number;
+  rollbackCount: number;
+  touBreakdown?: AnalyticsTouBreakdown;
+}
+
+export interface AnalyticsAggBucket {
+  time: string;
+  usage: number;
+  readingAvg?: number;
+  readingSum?: number;
+  prevUsage?: number;
+  changeRate?: number;
+  touPeriod: 'sharp' | 'peak' | 'flat' | 'valley';
+  spikeAnomaly?: boolean;
+}
+
+export interface AnalyticsSeriesPayload {
+  property: AnalyticsPropertyMeta;
+  source: AnalyticsSource;
+  mode: AnalyticsMode;
+  compare?: AnalyticsCompare;
+  from: string;
+  to: string;
+  prevFrom?: string;
+  prevTo?: string;
+  fleetStats: AnalyticsFleetStats;
+  aggregatedBuckets?: AnalyticsAggBucket[];
+  series: AnalyticsTerminalSeries[];
+}
+
+export async function fetchAnalyticsSeries(
+  params: {
+    typeId: number;
+    itemCode: string;
+    source: AnalyticsSource;
+    mode?: AnalyticsMode;
+    compare?: AnalyticsCompare;
+    from: string;
+    to: string;
+    terminalIds?: string[];
+  },
+  signal?: AbortSignal,
+): Promise<AnalyticsSeriesPayload> {
+  const search = new URLSearchParams({
+    type_id: String(params.typeId),
+    item_code: params.itemCode,
+    source: params.source,
+    from: params.from,
+    to: params.to,
+  });
+  if (params.mode) search.set('mode', params.mode);
+  if (params.compare && params.compare !== 'none') search.set('compare', params.compare);
+  if (params.terminalIds && params.terminalIds.length > 0) {
+    search.set('terminal_ids', params.terminalIds.join(','));
+  }
+  const payload = await request<AnalyticsSeriesPayload>(`/analytics/series?${search.toString()}`, {
+    signal,
+  });
+  return payload.data as AnalyticsSeriesPayload;
+}
+
+// ── 能耗总览与桑基能流图 API ─────────────────────────────────────────────────
+
+export interface AnalyticsOverviewBucket {
+  time: string;
+  currentVal: number;
+  prevVal: number;
+}
+
+export interface AnalyticsDomainOverview {
+  domainId: number;
+  domainCode: string;
+  domainName: string;
+  unit: string;
+  coalFactor: number;
+  carbonFactor: number;
+  currentUsage: number;
+  prevUsage: number;
+  changeRate?: number;
+  standardCoalKgce: number;
+  carbonKgCO2: number;
+  sharePercent: number;
+  terminalCount: number;
+  onlineCount: number;
+  buckets: AnalyticsOverviewBucket[];
+}
+
+export interface AnalyticsTypeEnergySummary {
+  typeId: number;
+  typeCode: string;
+  typeName: string;
+  domainName: string;
+  primaryItemCode: string;
+  primaryItemName: string;
+  unit: string;
+  terminalCount: number;
+  onlineCount: number;
+  currentUsage: number;
+  prevUsage: number;
+  changeRate?: number;
+  standardCoalKgce: number;
+  sharePercent: number;
+}
+
+export interface AnalyticsGatewayEnergySummary {
+  gatewayId: string;
+  gatewayName: string;
+  online: boolean;
+  terminalCount: number;
+  onlineCount: number;
+  currentUsage: number;
+  standardCoalKgce: number;
+  sharePercent: number;
+}
+
+export interface AnalyticsTerminalEnergyRank {
+  terminalId: string;
+  terminalName: string;
+  gatewayId: string;
+  typeId: number;
+  typeName: string;
+  domainName: string;
+  itemCode: string;
+  unit: string;
+  online: boolean;
+  firstReading?: number;
+  lastReading?: number;
+  usage: number;
+  prevUsage: number;
+  changeRate?: number;
+  standardCoalKgce: number;
+  sharePercent: number;
+}
+
+export interface AnalyticsSankeyNode {
+  id: string;
+  name: string;
+  category: 'domain' | 'device_type' | 'gateway' | 'terminal';
+  value: number;
+  rawValue: number;
+  unit: string;
+}
+
+export interface AnalyticsSankeyLink {
+  source: string;
+  target: string;
+  value: number;
+  rawValue: number;
+  unit: string;
+}
+
+export interface AnalyticsOverviewAlarmSummary {
+  spike50PctCount: number;
+  rollbackCount: number;
+  qualityIssueCount: number;
+  offlineTerminalCount: number;
+}
+
+export interface AnalyticsOverviewPayload {
+  from: string;
+  to: string;
+  prevFrom: string;
+  prevTo: string;
+  granularity: 'hour' | 'day' | 'month' | 'year';
+  totalStandardCoalKgce: number;
+  prevStandardCoalKgce: number;
+  coalChangeRate?: number;
+  totalCarbonKgCO2: number;
+  prevCarbonKgCO2: number;
+  carbonChangeRate?: number;
+  totalTerminals: number;
+  onlineTerminals: number;
+  terminalOnlineRate: number;
+  domains: AnalyticsDomainOverview[];
+  byDeviceType: AnalyticsTypeEnergySummary[];
+  byGateway: AnalyticsGatewayEnergySummary[];
+  topTerminals: AnalyticsTerminalEnergyRank[];
+  sankeyNodes: AnalyticsSankeyNode[];
+  sankeyLinks: AnalyticsSankeyLink[];
+  alarmSummary: AnalyticsOverviewAlarmSummary;
+}
+
+export async function fetchAnalyticsOverview(
+  params: {
+    from: string;
+    to: string;
+    granularity?: 'hour' | 'day' | 'month' | 'year';
+  },
+  signal?: AbortSignal,
+): Promise<AnalyticsOverviewPayload> {
+  const search = new URLSearchParams({ from: params.from, to: params.to });
+  if (params.granularity) search.set('granularity', params.granularity);
+  const payload = await request<AnalyticsOverviewPayload>(
+    `/analytics/overview?${search.toString()}`,
+    { signal },
+  );
+  return payload.data as AnalyticsOverviewPayload;
+}
+
+// ── 用能异常监测与跑冒滴漏平衡分析 API ───────────────────────────────────────
+
+export interface AnalyticsEnergyAlarmSummary {
+  overLimitCount: number;
+  spike50PctCount: number;
+  offHoursAnomalyCount: number;
+  leakageAnomalyCount: number;
+  rollbackCount: number;
+  rangeOutCount: number;
+}
+
+export interface AnalyticsEnergyAlarmEvent {
+  alarmType: 'over_limit' | 'spike_50pct' | 'off_hours' | 'leakage' | 'meter_rollback' | 'range_out';
+  label: string;
+  tone: 'danger' | 'warn' | 'info';
+  terminalId: string;
+  terminalName: string;
+  gatewayId: string;
+  typeName: string;
+  itemCode: string;
+  itemName: string;
+  unit: string;
+  time: string;
+  actualValue: number;
+  baselineValue: number;
+  deviationPct: number;
+  detail: string;
+}
+
+export interface AnalyticsBalanceBucket {
+  time: string;
+  masterUsage: number;
+  subUsageSum: number;
+  diffUsage: number;
+  diffPercent: number;
+  leakageAlarm: boolean;
+}
+
+export interface AnalyticsBalanceResult {
+  masterTerminalId: string;
+  masterTerminalName: string;
+  subTerminalIds: string[];
+  unit: string;
+  thresholdPct: number;
+  masterTotalUsage: number;
+  subTotalUsage: number;
+  totalDiffUsage: number;
+  totalDiffPercent: number;
+  alarmSlotCount: number;
+  buckets: AnalyticsBalanceBucket[];
+}
+
+export interface AnalyticsAnomaliesPayload {
+  from: string;
+  to: string;
+  granularity: 'hour' | 'day' | 'month';
+  offHoursSpec: string;
+  summary: AnalyticsEnergyAlarmSummary;
+  events: AnalyticsEnergyAlarmEvent[];
+  balanceAnalysis?: AnalyticsBalanceResult;
+}
+
+export async function fetchAnalyticsAnomalies(
+  params: {
+    from: string;
+    to: string;
+    granularity?: 'hour' | 'day' | 'month';
+    typeId?: number;
+    gatewayId?: string;
+    itemCode?: string;
+    dailyLimit?: number;
+    offHoursLimit?: number;
+    offHours?: string;
+    masterTerminalId?: string;
+    subTerminalIds?: string[];
+    leakageThresholdPct?: number;
+  },
+  signal?: AbortSignal,
+): Promise<AnalyticsAnomaliesPayload> {
+  const search = new URLSearchParams({ from: params.from, to: params.to });
+  if (params.granularity) search.set('granularity', params.granularity);
+  if (params.typeId && params.typeId > 0) search.set('type_id', String(params.typeId));
+  if (params.gatewayId) search.set('gateway_id', params.gatewayId);
+  if (params.itemCode) search.set('item_code', params.itemCode);
+  if (params.dailyLimit && params.dailyLimit > 0) search.set('daily_limit', String(params.dailyLimit));
+  if (params.offHoursLimit && params.offHoursLimit > 0) {
+    search.set('off_hours_limit', String(params.offHoursLimit));
+  }
+  if (params.offHours) search.set('off_hours', params.offHours);
+  if (params.masterTerminalId) search.set('master_terminal_id', params.masterTerminalId);
+  if (params.subTerminalIds && params.subTerminalIds.length > 0) {
+    search.set('sub_terminal_ids', params.subTerminalIds.join(','));
+  }
+  if (params.leakageThresholdPct !== undefined) {
+    search.set('leakage_threshold_pct', String(params.leakageThresholdPct));
+  }
+  const payload = await request<AnalyticsAnomaliesPayload>(
+    `/analytics/anomalies?${search.toString()}`,
+    { signal },
+  );
+  return payload.data as AnalyticsAnomaliesPayload;
+}
+
+export interface AnalyticsRawSummary {
+  totalItems: number;
+  writtenCount: number;
+  cleanPassCount: number;
+  qualityViolationCount: number;
+  droppedCount: number;
+  ignoredCount: number;
+  rangeOutCount: number;
+  ruleHitCount: number;
+  unitOutCount: number;
+  passRate?: number;
+  effectiveWriteRate?: number;
+}
+
+export interface AnalyticsExceptionDist {
+  errorType: string;
+  label: string;
+  tone: 'neutral' | 'positive' | 'negative' | 'warning';
+  count: number;
+  terminalCount: number;
+  lastSeen?: string;
+}
+
+export interface AnalyticsQualityTrendBucket {
+  bucket: string;
+  totalExceptions: number;
+  qualityViolationCount: number;
+  cleanFailedCount: number;
+  lateDroppedCount: number;
+}
+
+export interface AnalyticsTopTerminal {
+  terminalId: string;
+  terminalName: string;
+  gatewayId: string;
+  typeName: string;
+  totalCount: number;
+  qualityCount: number;
+  cleanFailedCount: number;
+  lateDroppedCount: number;
+  primaryErrorType: string;
+  primaryErrorLabel: string;
+  sampleDigest?: string;
+  lastSeen?: string;
+}
+
+export interface AnalyticsTopItem {
+  itemCode: string;
+  droppedCount: number;
+  qualityViolationCount: number;
+  totalIssues: number;
+  sampleReason?: string;
+}
+
+export interface AnalyticsQualityPayload {
+  from: string;
+  to: string;
+  bucketUnit: 'hour' | 'day';
+  totalExceptionCount: number;
+  affectedTerminals: number;
+  rawSummary: AnalyticsRawSummary;
+  exceptionsByType: AnalyticsExceptionDist[];
+  trend: AnalyticsQualityTrendBucket[];
+  topTerminals: AnalyticsTopTerminal[];
+  topItems: AnalyticsTopItem[];
+}
+
+export async function fetchAnalyticsQuality(
+  params: {
+    from: string;
+    to: string;
+    gatewayId?: string;
+    typeId?: number;
+  },
+  signal?: AbortSignal,
+): Promise<AnalyticsQualityPayload> {
+  const search = new URLSearchParams({ from: params.from, to: params.to });
+  if (params.gatewayId) search.set('gateway_id', params.gatewayId);
+  if (params.typeId && params.typeId > 0) search.set('type_id', String(params.typeId));
+  const payload = await request<AnalyticsQualityPayload>(`/analytics/quality?${search.toString()}`, {
+    signal,
+  });
+  return payload.data as AnalyticsQualityPayload;
+}
+
+export interface AnalyticsHealthOverview {
+  totalGateways: number;
+  enabledGateways: number;
+  onlineGateways: number;
+  gatewayOnlineRate: number;
+  totalTerminals: number;
+  enabledTerminals: number;
+  onlineTerminals: number;
+  terminalOnlineRate: number;
+  activeTerminalsInWindow: number;
+  silentOnlineTerminals: number;
+  totalMessagesInWindow: number;
+  totalBytesInWindow: number;
+  totalItemsInWindow: number;
+  lateDroppedInWindow: number;
+}
+
+export interface AnalyticsGatewayHealth {
+  gatewayId: string;
+  name: string;
+  enabled: boolean;
+  online: boolean;
+  lastSeenAt?: string;
+  terminalTotal: number;
+  terminalEnabled: number;
+  terminalOnline: number;
+  messageCount: number;
+  byteSize: number;
+  exceptionCount: number;
+  healthStatus: 'healthy' | 'warning' | 'offline' | 'disabled';
+}
+
+export interface AnalyticsDeviceTypeHealth {
+  typeId: number;
+  typeCode: string;
+  typeName: string;
+  domainName: string;
+  terminalTotal: number;
+  terminalEnabled: number;
+  terminalOnline: number;
+  onlineRate: number;
+}
+
+export interface AnalyticsTerminalHealth {
+  terminalId: string;
+  name: string;
+  typeId: number;
+  typeName: string;
+  gatewayId: string;
+  enabled: boolean;
+  online: boolean;
+  lastSeenAt?: string;
+  silenceSeconds?: number;
+  writtenCount: number;
+  droppedCount: number;
+  lateDroppedCount: number;
+  exceptionCount: number;
+  avgIntervalSeconds?: number;
+  healthStatus: 'healthy' | 'silent' | 'warning' | 'offline' | 'disabled';
+}
+
+export interface AnalyticsHealthPayload {
+  from: string;
+  to: string;
+  overview: AnalyticsHealthOverview;
+  gateways: AnalyticsGatewayHealth[];
+  byDeviceType: AnalyticsDeviceTypeHealth[];
+  terminals: AnalyticsTerminalHealth[];
+}
+
+export async function fetchAnalyticsHealth(
+  params: {
+    from: string;
+    to: string;
+    gatewayId?: string;
+  },
+  signal?: AbortSignal,
+): Promise<AnalyticsHealthPayload> {
+  const search = new URLSearchParams({ from: params.from, to: params.to });
+  if (params.gatewayId) search.set('gateway_id', params.gatewayId);
+  const payload = await request<AnalyticsHealthPayload>(`/analytics/health?${search.toString()}`, {
+    signal,
+  });
+  return payload.data as AnalyticsHealthPayload;
 }

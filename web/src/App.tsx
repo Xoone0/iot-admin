@@ -10,6 +10,10 @@ import { TerminalDetailPage } from './pages/TerminalDetailPage';
 import { SnapshotQueryListPage } from './pages/SnapshotQueryListPage';
 import { SnapshotQueryEditPage } from './pages/SnapshotQueryEditPage';
 import { SnapshotQueryResultPage } from './pages/SnapshotQueryResultPage';
+import { AnalyticsOverviewPage } from './pages/AnalyticsOverviewPage';
+import { AnalyticsTrendsPage } from './pages/AnalyticsTrendsPage';
+import { AnalyticsQualityPage } from './pages/AnalyticsQualityPage';
+import { AnalyticsHealthPage } from './pages/AnalyticsHealthPage';
 
 /** 旧路径兼容：/e/device-types[/:id] → /e/thing-models[/:id]。 */
 function LegacyDeviceTypes({ detail = false }: { detail?: boolean }) {
@@ -51,6 +55,11 @@ export default function App() {
         <Route path="e/snapshot-queries/new" element={<SnapshotQueryEditPage />} />
         <Route path="e/snapshot-queries/:id/edit" element={<SnapshotQueryEditPage />} />
         <Route path="e/snapshot-queries/:id/query" element={<SnapshotQueryResultPage />} />
+        {/* 分析模块：能耗总览、能耗统计与报表、用能告警与质量分析、设备与网关运行健康分析 */}
+        <Route path="a/overview" element={<AnalyticsOverviewPage />} />
+        <Route path="a/trends" element={<AnalyticsTrendsPage />} />
+        <Route path="a/quality" element={<AnalyticsQualityPage />} />
+        <Route path="a/health" element={<AnalyticsHealthPage />} />
         {/* 物模型详情：字段绑定 + 终端实例；旧 device-types 路径做重定向 */}
         <Route path="e/device-types" element={<LegacyDeviceTypes />} />
         <Route path="e/device-types/:id" element={<LegacyDeviceTypes detail />} />

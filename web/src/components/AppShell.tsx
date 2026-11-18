@@ -8,12 +8,15 @@ import {
   Database,
   FileSearch,
   Gauge,
+  HeartPulse,
   Menu,
   Moon,
   Router,
+  ShieldAlert,
   ShieldCheck,
   Sun,
   Timer,
+  TrendingUp,
   TriangleAlert,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -53,7 +56,7 @@ interface NavSection {
   items: NavItem[];
 }
 
-/** 导航分组：业务（非 snapshot- 实体）、快照（snapshot- 实体与只读页）、观测（其余只读页与异常页）。 */
+/** 导航分组：业务（非 snapshot- 实体）、快照（snapshot- 实体与只读页）、分析（趋势/质量/健康）、观测（其余只读页与异常页）。 */
 export function navSections(meta: MetaPayload): NavSection[] {
   const entities = meta.entities.map((e) => ({ name: e.name, title: e.title }));
   const pages = meta.readonly ?? [];
@@ -75,6 +78,15 @@ export function navSections(meta: MetaPayload): NavSection[] {
         ...pages
           .filter((p) => isSnapshot(p.slot))
           .map((p) => ({ to: `/r/${p.slot}`, label: p.title, icon: navIcon(p.slot) })),
+      ],
+    },
+    {
+      title: '分析',
+      items: [
+        { to: '/a/overview', label: '能耗总览', icon: Gauge },
+        { to: '/a/trends', label: '能耗统计与报表', icon: TrendingUp },
+        { to: '/a/quality', label: '用能告警与质量', icon: ShieldAlert },
+        { to: '/a/health', label: '运行健康', icon: HeartPulse },
       ],
     },
     {
@@ -165,7 +177,7 @@ export function AppShell() {
           </span>
           <span className="flex flex-col leading-tight">
             <span className="text-sm font-semibold tracking-tight">IoT 控制台</span>
-            <span className="text-[11px] text-muted">接入 · 快照 · 观测</span>
+            <span className="text-[11px] text-muted">接入 · 快照 · 分析 · 观测</span>
           </span>
         </div>
         <nav className="flex-1 overflow-y-auto px-2 py-3" aria-label="主导航">
