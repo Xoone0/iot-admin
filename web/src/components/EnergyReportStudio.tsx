@@ -484,43 +484,113 @@ export function EnergyReportStudio({
     return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
 
-  // Export strictly currently visible columns in current filtered & sorted row order (after RBAC check)
-  const handleDownloadVisible = async () => {
+  const triggerCsvDownload = (cols: ReportColumn[], rows: Array<Record<string, string>>, filename: string) => {
+    const header = cols.map((c) => escapeCsvCell(c.label)).join(',');
+    const lines = rows.map((row) => cols.map((c) => escapeCsvCell(row[c.key] ?? '')).join(','));
+    const csvText = `\uFEFF${[header, ...lines].join('\r\n')}\r\n`;
+    const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const applyFilterAndSort = (
+    rowsToProcess: Array<Record<string, string>>,
+    colsForSearch: ReportColumn[],
+  ): Array<Record<string, string>> => {
+    let list = rowsToProcess;
+    if (section === 'report-consumption' && f21EnergyTab !== 'all') {
+      list = list.filter((r) => r.energy === f21EnergyTab);
+    }
+    if (section === 'report-assessment' && f23Group !== 'all') {
+      list = list.filter((r) => classifyAssessmentRow(r) === f23Group);
+    }
+    if (section === 'report-retrofit' && f24StatusFilter !== 'all') {
+      list = list.filter((r) => r.mv_status === f24StatusFilter);
+    }
+    const q = searchQuery.trim().toLowerCase();
+    if (q) {
+      list = list.filter((r) =>
+        colsForSearch.some((c) => {
+          const val = (r[c.key] ?? '').toLowerCase();
+          if (val.includes(q)) return true;
+          if (c.key === 'energy' && (energyLabels[r[c.key] ?? ''] ?? '').toLowerCase().includes(q)) return true;
+          const badge = statusBadges[r[c.key] ?? ''];
+          if (badge && badge.label.toLowerCase().includes(q)) return true;
+          return false;
+        }),
+      );
+    }
+    if (!sortKey) return list;
+    return [...list].sort((a, b) => {
+      const av = a[sortKey] ?? '';
+      const bv = b[sortKey] ?? '';
+      const an = parseNum(av);
+      const bn = parseNum(bv);
+      const cmp = an != null && bn != null ? an - bn : av.localeCompare(bv, 'zh-CN');
+      return sortAsc ? cmp : -cmp;
+    });
+  };
+
+  // Export strictly current filtered & sorted scope (across all pages), with either visible columns or all columns.
+  // Always verifies backend export permission first (403 RBAC enforced).
+  const handleDownloadFiltered = async (fieldsMode: 'visible' | 'all') => {
     setExportMenuOpen(false);
     setCsvErr(null);
     setDownloading(true);
     try {
-      const authErr = await verifyLiveCsvAuth(effectiveExportEndpoint, token);
+      const authTarget = fieldsMode === 'all' ? fullExportEndpoint : effectiveExportEndpoint;
+      const authErr = await verifyLiveCsvAuth(authTarget, token);
       if (authErr) {
         setCsvErr(authErr);
         return;
       }
-      const header = activeColumns.map((c) => escapeCsvCell(c.label)).join(',');
-      const lines = sortedRows.map((row) =>
-        activeColumns.map((c) => escapeCsvCell(row[c.key] ?? '')).join(','),
+      if (fieldsMode === 'visible') {
+        triggerCsvDownload(
+          activeColumns,
+          sortedRows,
+          `energy-report-${data.reportCode.toLowerCase()}-filtered-visible-${activeColumns.length}cols.csv`,
+        );
+        return;
+      }
+      if (section !== 'report-custom') {
+        triggerCsvDownload(
+          allColumns,
+          sortedRows,
+          `energy-report-${data.reportCode.toLowerCase()}-filtered-all-${allColumns.length}cols.csv`,
+        );
+        return;
+      }
+      // F25 all-fields within current search & sort: fetch full whitelist rows and apply identical search & sort
+      const fullRes = await liveGet<LiveReportData>(fullExportEndpoint, token);
+      if (fullRes.error || !fullRes.data) {
+        setCsvErr(fullRes.error ?? '获取完整字段数据失败');
+        return;
+      }
+      const fullCols = fullRes.data.columns ?? allColumns;
+      const fullFilteredSorted = applyFilterAndSort(fullRes.data.rows ?? [], fullCols);
+      triggerCsvDownload(
+        fullCols,
+        fullFilteredSorted,
+        `energy-report-${data.reportCode.toLowerCase()}-filtered-all-${fullCols.length}cols.csv`,
       );
-      const csvText = `\uFEFF${[header, ...lines].join('\r\n')}\r\n`;
-      const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `energy-report-${data.reportCode.toLowerCase()}-visible-${activeColumns.length}cols.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
     } finally {
       setDownloading(false);
     }
   };
 
-  // Export official full-schema backend CSV snapshot
-  const handleDownloadFull = async () => {
+  // Export unfiltered raw backend snapshot (explicitly separated so users never mistake it for filtered rows)
+  const handleDownloadFullRaw = async () => {
     setExportMenuOpen(false);
     setCsvErr(null);
     setDownloading(true);
     try {
-      const err = await downloadLiveCsv(fullExportEndpoint, token, `energy-report-${data.reportCode.toLowerCase()}-full.csv`);
+      const err = await downloadLiveCsv(fullExportEndpoint, token, `energy-report-${data.reportCode.toLowerCase()}-raw-all.csv`);
       if (err) setCsvErr(err);
     } finally {
       setDownloading(false);
@@ -819,36 +889,57 @@ export function EnergyReportStudio({
               {exportMenuOpen && (
                 <div
                   role="menu"
-                  aria-label="选择 CSV 导出口径"
+                  aria-label="选择 CSV 导出范围与字段"
                   data-export-csv-menu
-                  className="absolute right-0 top-9 z-30 w-64 rounded-[4px] border border-line bg-surface p-1.5 shadow-xl"
+                  className="absolute right-0 top-9 z-30 w-72 rounded-[4px] border border-line bg-surface p-1.5 shadow-xl"
                 >
+                  <div className="px-2.5 pb-1 pt-1 text-[10px] font-medium text-muted">
+                    当前筛选与排序范围（{sortedRows.length} 条{totalPages > 1 ? ' · 跨全部页' : ''}）
+                  </div>
                   <button
                     type="button"
                     role="menuitem"
                     data-export-visible-csv
-                    onClick={handleDownloadVisible}
-                    className="flex w-full flex-col items-start rounded-[2px] px-3 py-2 text-left hover:bg-fill-1"
+                    onClick={() => handleDownloadFiltered('visible')}
+                    className="flex w-full flex-col items-start rounded-[2px] px-2.5 py-2 text-left hover:bg-fill-1"
                   >
                     <span className="text-[12px] font-medium text-fg">
-                      导出当前可见列（{activeColumns.length} 列）
+                      导出可见字段（{activeColumns.length} 列）
                     </span>
                     <span className="mt-0.5 text-[10px] text-muted">
-                      严格同步当前筛选、排序与 {sortedRows.length} 条记录
+                      遵循当前建筑、日期、筛选与排序
                     </span>
                   </button>
                   <button
                     type="button"
                     role="menuitem"
-                    data-export-full-csv
-                    onClick={handleDownloadFull}
-                    className="mt-0.5 flex w-full flex-col items-start rounded-[2px] border-t border-line/70 px-3 py-2 text-left hover:bg-fill-1"
+                    data-export-filtered-all-cols-csv
+                    onClick={() => handleDownloadFiltered('all')}
+                    className="flex w-full flex-col items-start rounded-[2px] px-2.5 py-2 text-left hover:bg-fill-1"
                   >
                     <span className="text-[12px] font-medium text-fg">
-                      导出完整字段（全部 {fullFieldCount} 列）
+                      导出全部字段（{fullFieldCount} 列）
                     </span>
                     <span className="mt-0.5 text-[10px] text-muted">
-                      后端官方审计快照（含版本号与计量边界）
+                      保持当前筛选与排序，补全隐藏审计字段
+                    </span>
+                  </button>
+
+                  <div className="mt-1 border-t border-line px-2.5 pb-1 pt-2 text-[10px] font-medium text-muted">
+                    全部原始记录（不含前端筛选/搜索/排序）
+                  </div>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    data-export-full-raw-csv
+                    onClick={handleDownloadFullRaw}
+                    className="flex w-full flex-col items-start rounded-[2px] px-2.5 py-2 text-left hover:bg-fill-1"
+                  >
+                    <span className="text-[12px] font-medium text-fg-2">
+                      导出全部原始记录（{rawRows.length} 条 · {fullFieldCount} 列）
+                    </span>
+                    <span className="mt-0.5 text-[10px] text-muted">
+                      后端原始完整快照，忽略表内筛选与排序
                     </span>
                   </button>
                 </div>

@@ -1092,6 +1092,7 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
               data={activePayload as AssessmentData}
               inventory={inventory}
               token={token}
+              readOnly={isLanReadOnly}
               onUpdated={() => setRefreshTick((n) => n + 1)}
             />
           )}
@@ -1115,6 +1116,7 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
               inventory={inventory}
               initialBuilding={building}
               initialEnergy={energy}
+              readOnly={isLanReadOnly}
               onUpdated={() => setRefreshTick((n) => n + 1)}
             />
           )}
@@ -1798,6 +1800,37 @@ function LiveCompositionView({
     return map;
   }, [inventory?.categoryBindings]);
 
+  // Classify prior-day comparability strictly by data existence, quality, and valid coverage rate (>=70%).
+  // Never confuse valid zero usage with missing data; allow absolute deltas from valid zero while blocking zero-denominator % rates.
+  type PrevComparability =
+    | 'no_data'
+    | 'missing_or_low_coverage'
+    | 'suspect_quality'
+    | 'valid_zero_base'
+    | 'comparable';
+
+  const prevComparability: PrevComparability = (() => {
+    if (!focusedCard || !prevFocusedCard) return 'no_data';
+    const prevCov = prevFocusedCard.coverage;
+    const curCov = focusedCard.coverage;
+    if (prevFocusedCard.usage == null || (prevCov.expected > 0 && prevCov.valid === 0)) {
+      return 'no_data';
+    }
+    if ((prevCov.suspect ?? 0) > 0 || (curCov.suspect ?? 0) > 0) {
+      return 'suspect_quality';
+    }
+    if (prevCov.rate == null || prevCov.rate < 0.7 || curCov.rate == null || curCov.rate < 0.7) {
+      return 'missing_or_low_coverage';
+    }
+    if (prevFocusedCard.usage === 0) {
+      return 'valid_zero_base';
+    }
+    return 'comparable';
+  })();
+
+  const allowAbsoluteDelta = prevComparability === 'comparable' || prevComparability === 'valid_zero_base';
+  const allowRatioAndShareShift = prevComparability === 'comparable';
+
   const categoryRows = useMemo(() => {
     if (!focusedCard) return [];
     const prevCatMap = new Map((prevFocusedCard?.categories ?? []).map((c) => [c.id, c]));
@@ -1840,8 +1873,19 @@ function LiveCompositionView({
 
     const rows: TreemapCategoryNode[] = (focusedCard.categories ?? []).map((c) => {
       const prev = prevCatMap.get(c.id);
-      const shareDiffPp = c.share != null && prev?.share != null ? (c.share - prev.share) * 100 : null;
-      const usageDelta = c.usage != null && prev?.usage != null ? c.usage - prev.usage : null;
+      const catPrevCovOk =
+        prev != null &&
+        prev.usage != null &&
+        prev.coverage.rate != null &&
+        prev.coverage.rate >= 0.7 &&
+        (prev.coverage.suspect ?? 0) === 0;
+      const catCurCovOk =
+        c.usage != null && c.coverage.rate != null && c.coverage.rate >= 0.7 && (c.coverage.suspect ?? 0) === 0;
+      const usageDelta = allowAbsoluteDelta && catCurCovOk && catPrevCovOk ? c.usage! - prev!.usage! : null;
+      const shareDiffPp =
+        allowRatioAndShareShift && catCurCovOk && catPrevCovOk && c.share != null && prev?.share != null
+          ? (c.share - prev.share) * 100
+          : null;
       return {
         id: c.id,
         name: c.name,
@@ -1858,14 +1902,17 @@ function LiveCompositionView({
     if (focusedCard.unclassifiedUsage && focusedCard.unclassifiedUsage > 0) {
       const share = focusedCard.usage ? focusedCard.unclassifiedUsage / focusedCard.usage : null;
       const prevUnclass = prevFocusedCard?.unclassifiedUsage ?? null;
-      const prevShare = prevUnclass != null && prevFocusedCard?.usage ? prevUnclass / prevFocusedCard.usage : null;
+      const prevShare =
+        allowRatioAndShareShift && prevUnclass != null && prevFocusedCard?.usage && prevFocusedCard.usage > 0
+          ? prevUnclass / prevFocusedCard.usage
+          : null;
       rows.push({
         id: '__unclassified__',
         name: '未分项（待分配）',
         value: focusedCard.unclassifiedUsage,
         share,
         shareDiffPp: share != null && prevShare != null ? (share - prevShare) * 100 : null,
-        usageDelta: prevUnclass != null ? focusedCard.unclassifiedUsage - prevUnclass : null,
+        usageDelta: allowAbsoluteDelta && prevUnclass != null ? focusedCard.unclassifiedUsage - prevUnclass : null,
         coverageRate: focusedCard.coverage.rate,
         isUnclassified: true,
         children: buildBoundLeaves('__unclassified__'),
@@ -1873,32 +1920,38 @@ function LiveCompositionView({
     }
 
     return rows.sort((a, b) => (a.isUnclassified ? 1 : b.isUnclassified ? -1 : b.value - a.value));
-  }, [focusedCard, prevFocusedCard, bindingMap]);
+  }, [focusedCard, prevFocusedCard, bindingMap, allowAbsoluteDelta, allowRatioAndShareShift]);
 
-  const hasComparablePrev = Boolean(
-    prevFocusedCard && prevFocusedCard.usage != null && prevFocusedCard.usage > 0,
-  );
   const topSystem = categoryRows.find((r) => !r.isUnclassified) ?? categoryRows[0] ?? null;
   const totalDelta =
-    hasComparablePrev && focusedCard?.usage != null && prevFocusedCard?.usage != null
+    allowAbsoluteDelta && focusedCard?.usage != null && prevFocusedCard?.usage != null
       ? focusedCard.usage - prevFocusedCard.usage
       : null;
-  const positiveGrowers = hasComparablePrev
+  const positiveGrowers = allowAbsoluteDelta
     ? categoryRows
         .filter((r) => r.usageDelta != null && r.usageDelta > 0.01)
         .sort((a, b) => (b.usageDelta ?? 0) - (a.usageDelta ?? 0))
     : [];
   const topGrowthDriver = positiveGrowers[0] ?? null;
+  // Percentage growth contribution requires non-zero prior total denominator (not valid_zero_base)
   const growthContribRatio =
-    topGrowthDriver?.usageDelta != null && totalDelta != null && totalDelta > 0
+    allowRatioAndShareShift && topGrowthDriver?.usageDelta != null && totalDelta != null && totalDelta > 0
       ? Math.min(1, topGrowthDriver.usageDelta / totalDelta)
       : null;
 
-  const topShareMover = hasComparablePrev
+  const topShareMover = allowRatioAndShareShift
     ? categoryRows
         .filter((r) => r.shareDiffPp != null)
         .sort((a, b) => Math.abs(b.shareDiffPp ?? 0) - Math.abs(a.shareDiffPp ?? 0))[0] ?? null
     : null;
+
+  const prevComparabilityText: Record<PrevComparability, string> = {
+    comparable: `基于 ${anchorDate} 与前一日 ${prevDateLabel} 实测构成比对`,
+    valid_zero_base: `前日 ${prevDateLabel} 为有效零用量（允许绝对变化，百分比增幅与占比变动不可计算）`,
+    no_data: `${anchorDate} · 前日 ${prevDateLabel} 无有效实测数据`,
+    missing_or_low_coverage: `${anchorDate} · 前日或当日存在缺测/覆盖率 < 70%，不可直接比对`,
+    suspect_quality: `${anchorDate} · 前日或当日含可疑质量槽位，不可直接比对`,
+  };
 
   const drilledNode = drilledCatId ? categoryRows.find((r) => r.id === drilledCatId) ?? null : null;
   const drawerNode = sourceDrawerCatId ? categoryRows.find((r) => r.id === sourceDrawerCatId) ?? null : null;
@@ -1995,10 +2048,8 @@ function LiveCompositionView({
           <div className="space-y-4">
             <div className="border-b border-line pb-2.5">
               <h2 className="text-[14px] font-semibold text-fg">分析发现</h2>
-              <p className="mt-0.5 text-[11px] text-muted">
-                {hasComparablePrev
-                  ? `基于 ${anchorDate} 与前一日 ${prevDateLabel} 实测构成比对`
-                  : `${anchorDate} · 无可比前日实测数据`}
+              <p className="mt-0.5 text-[11px] text-muted" data-f02-comparability={prevComparability}>
+                {prevComparabilityText[prevComparability]}
               </p>
             </div>
 
@@ -2030,17 +2081,25 @@ function LiveCompositionView({
             <div className="rounded-[4px] border border-line bg-fill-1/35 p-3.5">
               <div className="flex items-center justify-between text-[11px] text-muted">
                 <span>增长贡献最大分项</span>
-                {growthContribRatio != null && (
-                  <span className="font-medium text-warning">贡献 {fmtPct(growthContribRatio)}</span>
+                {prevComparability === 'valid_zero_base' ? (
+                  <span className="text-[10px] text-muted">百分比增幅不可计算</span>
+                ) : (
+                  growthContribRatio != null && (
+                    <span className="font-medium text-warning">贡献 {fmtPct(growthContribRatio)}</span>
+                  )
                 )}
               </div>
-              {!hasComparablePrev ? (
-                <p className="mt-1.5 text-[12px] text-muted">无可比前日实测数据，不输出增长归因</p>
+              {prevComparability === 'no_data' ? (
+                <p className="mt-1.5 text-[12px] text-muted">前日无实测数据，不输出增长归因</p>
+              ) : prevComparability === 'missing_or_low_coverage' ? (
+                <p className="mt-1.5 text-[12px] text-warning">存在缺测或覆盖率不足（&lt;70%），不可比对</p>
+              ) : prevComparability === 'suspect_quality' ? (
+                <p className="mt-1.5 text-[12px] text-warning">含可疑质量数据，不可直接输出增长归因</p>
               ) : topGrowthDriver ? (
                 <>
                   <p className="mt-1.5 text-[15px] font-semibold text-fg">{topGrowthDriver.name}</p>
                   <p className="mt-1 text-[12px] font-medium text-negative">
-                    较前日 +{fmtNum(topGrowthDriver.usageDelta)} {focusedCard?.unit}
+                    较前日{prevComparability === 'valid_zero_base' ? '（有效零用量）' : ''} +{fmtNum(topGrowthDriver.usageDelta)} {focusedCard?.unit}
                   </p>
                   <button
                     type="button"
@@ -2064,7 +2123,13 @@ function LiveCompositionView({
                 <span>结构占比变化最大分项</span>
                 <span className="text-[10px]">单位：百分点</span>
               </div>
-              {topShareMover && topShareMover.shareDiffPp != null ? (
+              {prevComparability === 'valid_zero_base' ? (
+                <p className="mt-1.5 text-[12px] text-muted">前日为有效零用量（分母为 0），占比变动不可计算</p>
+              ) : prevComparability === 'missing_or_low_coverage' ? (
+                <p className="mt-1.5 text-[12px] text-warning">存在缺测或覆盖不足，结构占比不可比较</p>
+              ) : prevComparability === 'suspect_quality' ? (
+                <p className="mt-1.5 text-[12px] text-warning">含可疑质量数据，结构占比不可比较</p>
+              ) : topShareMover && topShareMover.shareDiffPp != null ? (
                 <>
                   <p className="mt-1.5 text-[15px] font-semibold text-fg">{topShareMover.name}</p>
                   <p
@@ -2089,7 +2154,7 @@ function LiveCompositionView({
                   </button>
                 </>
               ) : (
-                <p className="mt-1.5 text-[12px] text-muted">无可比前日实测数据，不计算结构变动</p>
+                <p className="mt-1.5 text-[12px] text-muted">前日无实测数据，不计算结构变动</p>
               )}
             </div>
           </div>
@@ -6808,11 +6873,13 @@ function LiveAssessmentView({
   data,
   inventory,
   token,
+  readOnly = false,
   onUpdated,
 }: {
   data: AssessmentData;
   inventory: InventoryData | null;
   token: string;
+  readOnly?: boolean;
   onUpdated: () => void;
 }) {
   const rows = data.rows ?? [];
@@ -6997,9 +7064,18 @@ function LiveAssessmentView({
 
       {/* ── 4. Actionable Assessment Detail Ledger (Below Charts) ── */}
       <section className="arco-card overflow-x-auto">
-        <div className="flex items-center justify-between border-b border-line px-5 py-3">
-          <h2 className="text-[15px] font-medium text-fg">组织与区域考核明细表与复核操作</h2>
-          <span className="text-[12px] text-muted">支持在线确认与发起复核申诉</span>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-3">
+          <h2 className="text-[15px] font-medium text-fg">组织与区域考核明细表{readOnly ? '' : '与复核操作'}</h2>
+          {readOnly ? (
+            <span
+              data-readonly-notice="f15"
+              className="rounded-[2px] border border-primary/25 bg-primary-soft/50 px-2 py-0.5 text-[11px] font-medium text-primary"
+            >
+              只读模式：禁止在线确认与发起申诉写入
+            </span>
+          ) : (
+            <span className="text-[12px] text-muted">支持在线确认与发起复核申诉</span>
+          )}
         </div>
         <table className="w-full text-left text-xs">
           <thead className="border-b border-line bg-surface-2 text-muted">
@@ -7050,11 +7126,12 @@ function LiveAssessmentView({
                     >
                       {r.exempt ? '豁免·已确认' : (statusLabels[r.reviewStatus] ?? r.reviewStatus)}
                     </span>
-                    {!r.exempt && r.confirmable && (
+                    {!readOnly && !r.exempt && r.confirmable && (
                       <>
                         {r.reviewStatus !== 'confirmed' && (
                           <button
                             type="button"
+                            data-f15-confirm={r.ruleId}
                             disabled={busyRule === r.ruleId}
                             onClick={() => handleReview(r.ruleId, 'confirmed', '人工复核覆盖率与指标无误后确认（模拟）')}
                             className="rounded border border-positive/40 px-1.5 py-0.5 text-[11px] text-positive hover:bg-positive-soft"
@@ -7065,6 +7142,7 @@ function LiveAssessmentView({
                         {r.reviewStatus !== 'appealed' && (
                           <button
                             type="button"
+                            data-f15-appeal={r.ruleId}
                             disabled={busyRule === r.ruleId}
                             onClick={() => handleReview(r.ruleId, 'appealed', '发起考核复核申诉（模拟）')}
                             className="rounded border border-warning/40 px-1.5 py-0.5 text-[11px] text-warning hover:bg-warning-soft"

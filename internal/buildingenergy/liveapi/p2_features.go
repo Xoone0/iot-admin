@@ -751,6 +751,9 @@ func (s *Service) CreateRetrofitProject(ctx context.Context, req CreateRetrofitR
 			dailyAvg = math.Round((*bUse/days)*1000) / 1000
 		}
 	}
+	if err := validateRetrofitSavingsAgainstBaseline(req.EstSavingsLow, req.EstSavingsBase, req.EstSavingsHigh, dailyAvg, unit); err != nil {
+		return RetrofitProjectRecord{}, err
+	}
 
 	mvNote := strings.TrimSpace(req.MVNote)
 	if mvNote == "" {
@@ -963,6 +966,11 @@ func (s *Service) UpdateRetrofitProject(ctx context.Context, req UpdateRetrofitR
 			next.BaselineDailyAvg = math.Round((*bUse/days)*1000) / 1000
 		}
 	}
+	if req.EstSavingsLow != nil || req.EstSavingsBase != nil || req.EstSavingsHigh != nil {
+		if err := validateRetrofitSavingsAgainstBaseline(next.EstSavingsLow, next.EstSavingsBase, next.EstSavingsHigh, next.BaselineDailyAvg, next.Unit); err != nil {
+			return RetrofitProjectRecord{}, err
+		}
+	}
 
 	actor := principalActorSub(ctx)
 	tx, err := s.DB.BeginReadCommitted(ctx)
@@ -1034,6 +1042,50 @@ ON CONFLICT (tenant_id, project_id, retrofit_id, baseline_version) DO UPDATE SET
 		}
 	}
 	return RetrofitProjectRecord{}, ErrNotFound
+}
+
+// validateRetrofitSavingsAgainstBaseline enforces physical validity for F19 scenario savings:
+// 1. Finite and non-negative values;
+// 2. Monotonic scenario ordering (conservative <= base <= optimistic when populated);
+// 3. No scenario may exceed the annualized physical baseline usage (dailyAvg * 365).
+func validateRetrofitSavingsAgainstBaseline(low, base, high, dailyAvg float64, unit string) error {
+	for _, pair := range []struct {
+		name string
+		val  float64
+	}{
+		{"保守情景年节能量", low},
+		{"基准情景年节能量", base},
+		{"乐观情景年节能量", high},
+	} {
+		if math.IsNaN(pair.val) || math.IsInf(pair.val, 0) || pair.val < 0 {
+			return fmt.Errorf("%w: %s必须为非负有效数值", ErrBadRequest, pair.name)
+		}
+	}
+	if base > 0 && low > base {
+		return fmt.Errorf("%w: 保守情景年节能量 (%.3f) 不可高于基准情景 (%.3f)", ErrBadRequest, low, base)
+	}
+	if high > 0 && base > high {
+		return fmt.Errorf("%w: 基准情景年节能量 (%.3f) 不可高于乐观情景 (%.3f)", ErrBadRequest, base, high)
+	}
+	if dailyAvg > 0 {
+		annualBaseline := math.Round(dailyAvg*365.0*1000) / 1000
+		for _, pair := range []struct {
+			name string
+			val  float64
+		}{
+			{"保守情景年节能量", low},
+			{"基准情景年节能量", base},
+			{"乐观情景年节能量", high},
+		} {
+			if pair.val > annualBaseline {
+				return fmt.Errorf(
+					"%w: %s (%.3f %s) 超出改造前年化物理基线上限 (%.3f %s/年)，物理上不可成立",
+					ErrBadRequest, pair.name, pair.val, unit, annualBaseline, unit,
+				)
+			}
+		}
+	}
+	return nil
 }
 
 // LockRetrofitBaseline locks the active baseline version and freezes its actual usage/coverage snapshot.

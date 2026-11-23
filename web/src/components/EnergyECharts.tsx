@@ -399,6 +399,7 @@ export function EnergySankeyChart({
         const color = isDiff ? SANKEY_DIFF_COLOR : EDITORIAL_PALETTE[i % EDITORIAL_PALETTE.length];
         const shareStr = t.share != null ? pctFmt.format(Math.abs(t.share)) : '—';
         const shortName = t.displayName || t.name;
+        const isTinyFlow = t.share != null && Math.abs(t.share) < 0.04;
         const metaLine = isDiff
           ? `待核查差额（非线损）· ${shareStr}`
           : `${t.zone !== '—' ? t.zone : t.terminalId} · 占总表 ${shareStr}`;
@@ -416,7 +417,9 @@ export function EnergySankeyChart({
             align: 'left' as const,
             distance: 16,
             formatter: () =>
-              `{title|${shortName}}  {${isDiff ? 'valWarn' : 'val'}|${fmtVal(t.usage)} ${unit}}\n{meta|${metaLine}}`,
+              isTinyFlow
+                ? `{title|${shortName}}  {${isDiff ? 'valWarn' : 'val'}|${fmtVal(t.usage)} ${unit}}  {meta|${shareStr}}`
+                : `{title|${shortName}}  {${isDiff ? 'valWarn' : 'val'}|${fmtVal(t.usage)} ${unit}}\n{meta|${metaLine}}`,
           },
         };
       }),
@@ -500,6 +503,10 @@ export function EnergySankeyChart({
             blur: {
               itemStyle: { opacity: 0.32 },
               lineStyle: { opacity: 0.06 },
+            },
+            labelLayout: {
+              moveOverlap: 'shiftY',
+              hideOverlap: true,
             },
             label: {
               show: true,

@@ -162,6 +162,7 @@ export function RetrofitWorkspace({
   inventory,
   initialBuilding,
   initialEnergy,
+  readOnly = false,
   onUpdated,
 }: {
   data: RetrofitData;
@@ -170,6 +171,7 @@ export function RetrofitWorkspace({
   inventory: InventoryData | null;
   initialBuilding?: string;
   initialEnergy?: string;
+  readOnly?: boolean;
   onUpdated: () => void;
 }) {
   const projects = data.projects ?? [];
@@ -508,28 +510,40 @@ export function RetrofitWorkspace({
           </div>
 
           <div className="flex items-center gap-2">
-            {mode === 'retrofit-baseline' && (
-              <button
-                type="button"
-                onClick={() => {
-                  setCreating((v) => !v);
-                  setFeedback(null);
-                }}
-                className="inline-flex items-center gap-1.5 rounded-[4px] bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover"
+            {readOnly ? (
+              <span
+                data-readonly-notice="retrofit"
+                className="inline-flex h-7 items-center gap-1.5 rounded-[2px] border border-primary/25 bg-primary-soft/50 px-2.5 text-[11px] font-medium text-primary"
               >
-                <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                {creating ? '收起新建' : '新建改造项目'}
-              </button>
-            )}
-            {mode === 'retrofit-verification' && (
-              <button
-                type="button"
-                onClick={() => setShowMvForm((v) => !v)}
-                className="inline-flex items-center gap-1.5 rounded-[4px] border border-line bg-surface px-3 py-1.5 text-xs font-medium text-fg hover:bg-surface-2"
-              >
-                <SlidersHorizontal className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
-                {showMvForm ? '收起核验表单' : '调整周期并执行核验'}
-              </button>
+                <Lock className="h-3 w-3" aria-hidden="true" />
+                只读模式：禁止新建、修改、锁定基线与写入核验
+              </span>
+            ) : (
+              <>
+                {mode === 'retrofit-baseline' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCreating((v) => !v);
+                      setFeedback(null);
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-[4px] bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover"
+                  >
+                    <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                    {creating ? '收起新建' : '新建改造项目'}
+                  </button>
+                )}
+                {mode === 'retrofit-verification' && (
+                  <button
+                    type="button"
+                    onClick={() => setShowMvForm((v) => !v)}
+                    className="inline-flex items-center gap-1.5 rounded-[4px] border border-line bg-surface px-3 py-1.5 text-xs font-medium text-fg hover:bg-surface-2"
+                  >
+                    <SlidersHorizontal className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
+                    {showMvForm ? '收起核验表单' : '调整周期并执行核验'}
+                  </button>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -1025,7 +1039,12 @@ export function RetrofitWorkspace({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  {!active.baselineLocked ? (
+                  {active.baselineLocked ? (
+                    <span className="inline-flex h-7 items-center gap-1 rounded-[2px] bg-positive-soft px-2.5 text-[11px] font-medium text-positive">
+                      <Lock className="h-3 w-3" aria-hidden="true" />
+                      已锁定 · 禁止直接覆盖
+                    </span>
+                  ) : !readOnly ? (
                     <>
                       <input
                         value={lockReason}
@@ -1046,20 +1065,21 @@ export function RetrofitWorkspace({
                       </button>
                     </>
                   ) : (
-                    <span className="inline-flex h-7 items-center gap-1 rounded-[2px] bg-positive-soft px-2.5 text-[11px] font-medium text-positive">
-                      <Lock className="h-3 w-3" aria-hidden="true" />
-                      已锁定 · 禁止直接覆盖
+                    <span className="inline-flex h-7 items-center gap-1 rounded-[2px] bg-fill-2 px-2.5 text-[11px] text-fg-2">
+                      草稿未锁定（只读预览不可锁定）
                     </span>
                   )}
-                  <button
-                    type="button"
-                    data-toggle-base-edit
-                    onClick={() => setShowBaseEditForm((v) => !v)}
-                    className="arco-btn !h-7 text-[12px]"
-                  >
-                    <Wrench className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
-                    <span>{showBaseEditForm ? '收起编辑表单' : active.baselineLocked ? '新建基线版本 / 编辑' : '编辑基线参数'}</span>
-                  </button>
+                  {!readOnly && (
+                    <button
+                      type="button"
+                      data-toggle-base-edit
+                      onClick={() => setShowBaseEditForm((v) => !v)}
+                      className="arco-btn !h-7 text-[12px]"
+                    >
+                      <Wrench className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
+                      <span>{showBaseEditForm ? '收起编辑表单' : active.baselineLocked ? '新建基线版本 / 编辑' : '编辑基线参数'}</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1598,10 +1618,21 @@ export function RetrofitWorkspace({
                     <button
                       type="submit"
                       data-sc-save
-                      disabled={busy}
-                      className="h-8 rounded-[2px] bg-primary px-4 text-[12px] font-medium text-white hover:bg-primary/90 disabled:opacity-50"
+                      disabled={busy || readOnly || anyExceedsPhysical}
+                      title={
+                        readOnly
+                          ? '局域网只读预览仅支持本地灵敏度试算，不可写入数据库'
+                          : anyExceedsPhysical
+                            ? '存在情景超过改造前年化物理基线，服务端禁止写入'
+                            : undefined
+                      }
+                      className="h-8 rounded-[2px] bg-primary px-4 text-[12px] font-medium text-white hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      保存测算参数并写入
+                      {readOnly
+                        ? '只读模式不可写入（支持本地试算）'
+                        : anyExceedsPhysical
+                          ? '超物理基线禁止写入'
+                          : '保存测算参数并写入'}
                     </button>
                   </div>
                 </form>

@@ -2,6 +2,7 @@ package liveapi
 
 import (
 	"context"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -222,4 +223,28 @@ func TestLiveCSVExportPermissionAndF15F20Fixes(t *testing.T) {
 	}
 	t.Logf("ALL 5 FIXES LIVE VERIFIED: CSV 403/200 enforced (F21-F25) | F01 Carbon=%.2f kgCO2e (%s) | F15 WeightedScore=%.1f | F20 (%s) ReportCov=%.1f%% CarbonRed=%.2f kgCO2e",
 		*ov.CarbonSummary.TotalKgCO2e, ov.CarbonSummary.Status, *as.WeightedTotalScore, verifiedProj.RetrofitID, *verifiedProj.ReportActualCoverage.Rate*100, *verifiedProj.VerifiedCarbonReductionKgCO2)
+}
+
+func TestValidateRetrofitSavingsAgainstBaseline(t *testing.T) {
+	// Daily avg 100 GJ -> annual baseline 36,500 GJ
+	if err := validateRetrofitSavingsAgainstBaseline(1000, 2000, 3000, 100, "GJ"); err != nil {
+		t.Fatalf("expected valid savings within physical baseline, got %v", err)
+	}
+	// Exceeding annualized physical baseline (480.469 GJ) MUST fail with ErrBadRequest
+	err := validateRetrofitSavingsAgainstBaseline(300, 650, 820, 1.316353, "GJ")
+	if !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest for over-baseline savings, got %v", err)
+	}
+	// Violating scenario ordering (low > base) MUST fail with ErrBadRequest
+	errOrder := validateRetrofitSavingsAgainstBaseline(250, 200, 300, 10, "GJ")
+	if !errors.Is(errOrder, ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest for low > base, got %v", errOrder)
+	}
+	// Negative / NaN savings MUST fail with ErrBadRequest
+	if errNeg := validateRetrofitSavingsAgainstBaseline(-1, 10, 20, 10, "kWh"); !errors.Is(errNeg, ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest for negative savings, got %v", errNeg)
+	}
+	if errNaN := validateRetrofitSavingsAgainstBaseline(0, math.NaN(), 0, 10, "kWh"); !errors.Is(errNaN, ErrBadRequest) {
+		t.Fatalf("expected ErrBadRequest for NaN savings, got %v", errNaN)
+	}
 }
