@@ -2115,7 +2115,7 @@ export function BaselineVsActualChart({
   );
 }
 
-// ── 8. RetrofitScenarioChart (F19 3-Scenario Comparison) ────────────────────
+// ── 8. RetrofitScenarioChart (F19 3-Scenario Vertical Column Comparison + Physical Baseline Ceiling) ──
 
 export function RetrofitScenarioChart({
   low,
@@ -2127,6 +2127,7 @@ export function RetrofitScenarioChart({
   paybackLow,
   paybackBase,
   paybackHigh,
+  annualizedBaseline,
   unit,
 }: {
   low: number;
@@ -2138,37 +2139,105 @@ export function RetrofitScenarioChart({
   paybackLow?: number | null;
   paybackBase?: number | null;
   paybackHigh?: number | null;
+  annualizedBaseline?: number | null;
   unit: string;
 }) {
-  const maxVal = Math.max(low, base, high, 1);
+  const [hoverKey, setHoverKey] = useState<string | null>(null);
   const rows = [
-    { name: '保守情景', savings: low, cost: costLow, payback: paybackLow, color: '#86909C' },
-    { name: '基准情景（推荐）', savings: base, cost: costBase, payback: paybackBase, color: '#165DFF' },
-    { name: '乐观情景', savings: high, cost: costHigh, payback: paybackHigh, color: '#00B42A' },
+    { key: 'low', name: '保守情景', savings: low, cost: costLow, payback: paybackLow, color: '#86909C' },
+    { key: 'base', name: '基准情景（推荐）', savings: base, cost: costBase, payback: paybackBase, color: '#165DFF' },
+    { key: 'high', name: '乐观情景', savings: high, cost: costHigh, payback: paybackHigh, color: '#00B42A' },
   ];
 
+  const topRaw = Math.max(low, base, high, annualizedBaseline ?? 0, 1);
+  const scale = niceScale(topRaw * 1.18, 4);
+  const W = 680;
+  const H = 224;
+  const pad = { top: 26, right: 20, bottom: 42, left: 64 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+  const yAt = (v: number) => pad.top + plotH - (Math.max(0, v) / scale.max) * plotH;
+  const slotW = plotW / rows.length;
+  const barW = Math.min(72, slotW * 0.42);
+  const baseLineY = annualizedBaseline != null && annualizedBaseline > 0 ? yAt(annualizedBaseline) : null;
+  const anyExceeds = annualizedBaseline != null && annualizedBaseline > 0 && rows.some((r) => r.savings > annualizedBaseline);
+  const hovered = rows.find((r) => r.key === hoverKey) ?? null;
+
   return (
-    <div className="space-y-3 tabular">
-      {rows.map((r) => (
-        <div key={r.name} className="space-y-1.5">
-          <div className="flex flex-wrap items-baseline justify-between gap-2 text-[12px]">
-            <span className="font-medium text-fg">{r.name}</span>
-            <div className="flex flex-wrap items-baseline gap-3">
-              <span className="font-semibold text-fg">
-                {fmtVal(r.savings)} <span className="text-[11px] font-normal text-muted">{unit}/年</span>
-              </span>
-              {r.cost != null && <span className="text-muted">节费 ¥{fmtVal(r.cost)}</span>}
-              {r.payback != null && <span className="font-medium text-primary">回收 {r.payback.toFixed(1)} 年</span>}
+    <div className="space-y-2 tabular">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted">
+        <span>三情景预计年节能量对照（柱状图 · 单位：{unit}/年）</span>
+        {annualizedBaseline != null && annualizedBaseline > 0 && (
+          <span className={`inline-flex items-center gap-1.5 ${anyExceeds ? 'font-medium text-negative' : 'text-fg-2'}`}>
+            <span className="w-4 border-t-2 border-dashed border-negative" />
+            年化基线物理上限 {fmtVal(annualizedBaseline)} {unit}
+          </span>
+        )}
+      </div>
+
+      <div className="relative select-none" onMouseLeave={() => setHoverKey(null)}>
+        <svg viewBox={`0 0 ${W} ${H}`} className="h-auto max-h-[244px] w-full overflow-visible" role="img" aria-label={`三情景年节能量柱状对比图（单位 ${unit}/年）`}>
+          {scale.steps.map((v) => {
+            const y = yAt(v);
+            return (
+              <g key={v}>
+                <line x1={pad.left} x2={W - pad.right} y1={y} y2={y} stroke="var(--line)" strokeDasharray={v === 0 ? undefined : '3 3'} />
+                <text x={pad.left - 8} y={y + 3.5} textAnchor="end" className="fill-muted text-[10px]">
+                  {fmtCompact(v)}
+                </text>
+              </g>
+            );
+          })}
+
+          {rows.map((r, idx) => {
+            const cx = pad.left + idx * slotW + slotW / 2;
+            const bx = cx - barW / 2;
+            const by = yAt(r.savings);
+            const bh = Math.max(2, pad.top + plotH - by);
+            const exceeds = annualizedBaseline != null && annualizedBaseline > 0 && r.savings > annualizedBaseline;
+            const isHov = hoverKey === r.key;
+            const fill = exceeds ? '#F53F3F' : r.color;
+
+            return (
+              <g key={r.key} className="cursor-pointer" onMouseEnter={() => setHoverKey(r.key)}>
+                {isHov && <rect x={pad.left + idx * slotW} y={pad.top} width={slotW} height={plotH} fill="var(--fill-2)" fillOpacity={0.5} />}
+                <rect x={bx} y={by} width={barW} height={bh} rx={2} fill={fill} fillOpacity={isHov ? 1 : 0.88} />
+                <text x={cx} y={by - 7} textAnchor="middle" className={`text-[11px] font-semibold ${exceeds ? 'fill-negative' : 'fill-fg'}`}>
+                  {fmtCompact(r.savings)}{exceeds ? ' (超基线)' : ''}
+                </text>
+                <text x={cx} y={H - 22} textAnchor="middle" className="fill-fg text-[11px] font-medium">
+                  {r.name}
+                </text>
+                <text x={cx} y={H - 8} textAnchor="middle" className="fill-muted text-[10px]">
+                  {r.cost != null ? `节费 ¥${fmtCompact(r.cost)}` : '缺单价'}
+                  {r.payback != null ? ` · ${r.payback.toFixed(1)}年` : ''}
+                </text>
+              </g>
+            );
+          })}
+
+          {baseLineY != null && (
+            <line x1={pad.left} x2={W - pad.right} y1={baseLineY} y2={baseLineY} stroke="#F53F3F" strokeWidth={1.6} strokeDasharray="5 4" />
+          )}
+        </svg>
+
+        {hovered && (
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-2 rounded-[2px] bg-fill-1 px-3 py-1.5 text-[11px]">
+            <span className="font-medium text-fg">{hovered.name}</span>
+            <div className="flex flex-wrap items-center gap-3">
+              <span>预计年节能量 <strong className="text-fg">{fmtVal(hovered.savings)} {unit}</strong></span>
+              {annualizedBaseline != null && annualizedBaseline > 0 && (
+                hovered.savings > annualizedBaseline ? (
+                  <span className="font-semibold text-negative">超出物理基线 +{fmtVal(hovered.savings - annualizedBaseline)} {unit}（无效节能率）</span>
+                ) : (
+                  <span className="text-positive">占年化基线 {pctFmt.format(hovered.savings / annualizedBaseline)}</span>
+                )
+              )}
+              {hovered.payback != null && <span className="text-primary">静态回收 {hovered.payback.toFixed(2)} 年</span>}
             </div>
           </div>
-          <div className="h-[10px] w-full overflow-hidden rounded-[2px] bg-fill-2">
-            <div
-              className="h-full rounded-[2px]"
-              style={{ width: `${Math.max(2, (r.savings / maxVal) * 100)}%`, backgroundColor: r.color }}
-            />
-          </div>
-        </div>
-      ))}
+        )}
+      </div>
     </div>
   );
 }
@@ -3936,6 +4005,342 @@ export function SpatialHierarchyMap({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// ── 17. GroupedComparisonBarChart (F07 Object Side-by-Side & F08 Period Side-by-Side) ──
+
+export type GroupedBarDatum = {
+  id: string;
+  label: string;
+  shortLabel?: string;
+  current: number | null;
+  baseline: number | null;
+  comparable?: boolean;
+  reason?: string;
+};
+
+export function GroupedComparisonBarChart({
+  items,
+  unit,
+  currentLabel = '本期实测',
+  baselineLabel = '对照上期',
+  averageValue,
+  selectedId,
+  onSelect,
+  height = 264,
+  wide = false,
+}: {
+  items: GroupedBarDatum[];
+  unit: string;
+  currentLabel?: string;
+  baselineLabel?: string;
+  averageValue?: number | null;
+  selectedId?: string | null;
+  onSelect?: (id: string) => void;
+  height?: number;
+  wide?: boolean;
+}) {
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
+  if (items.length === 0) {
+    return (
+      <div className="flex h-[220px] items-center justify-center rounded-[4px] border border-dashed border-line bg-fill-1/40 text-[12px] text-muted">
+        暂无可分组对比的同口径数据
+      </div>
+    );
+  }
+
+  const maxRaw = Math.max(
+    ...items.flatMap((it) => [it.current ?? 0, it.baseline ?? 0]),
+    averageValue ?? 0,
+    1,
+  );
+  const scale = niceScale(maxRaw * 1.16, 4);
+
+  const W = wide ? 920 : 760;
+  const H = height;
+  const pad = { top: 24, right: 20, bottom: 44, left: 60 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+  const yAt = (v: number) => pad.top + plotH - (Math.max(0, v) / scale.max) * plotH;
+
+  const slotW = plotW / items.length;
+  const hasBaseline = items.some((it) => it.baseline != null);
+  const barGap = hasBaseline ? Math.min(4, slotW * 0.06) : 0;
+  const barW = hasBaseline
+    ? Math.min(28, Math.max(5, (slotW * 0.68 - barGap) / 2))
+    : Math.min(40, Math.max(8, slotW * 0.52));
+
+  const labelStep = items.length > 16 ? Math.ceil(items.length / 10) : items.length > 10 ? 2 : 1;
+  const activeIdx = hoverIdx ?? (selectedId ? items.findIndex((x) => x.id === selectedId) : -1);
+  const activeItem = activeIdx >= 0 ? items[activeIdx] : null;
+  const activeDelta =
+    activeItem && activeItem.current != null && activeItem.baseline != null
+      ? activeItem.current - activeItem.baseline
+      : null;
+  const activeRate =
+    activeDelta != null && activeItem?.baseline && activeItem.baseline > 0
+      ? activeDelta / activeItem.baseline
+      : null;
+
+  return (
+    <div className="space-y-2 tabular">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted">
+        <div className="flex flex-wrap items-center gap-4">
+          <span className="inline-flex items-center gap-1.5 text-fg-2">
+            <span className="size-2.5 rounded-[2px] bg-primary" />
+            {currentLabel} ({unit})
+          </span>
+          {hasBaseline && (
+            <span className="inline-flex items-center gap-1.5 text-fg-2">
+              <span className="size-2.5 rounded-[2px] bg-[#0FC6C2]" />
+              {baselineLabel} ({unit})
+            </span>
+          )}
+          {averageValue != null && (
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-3.5 border-t-2 border-dashed border-warning" />
+              同口径均值 {fmtCompact(averageValue)}
+            </span>
+          )}
+        </div>
+        <span>同一能源、同一单位分组柱状对照（缺测留空不补 0）</span>
+      </div>
+
+      <div className="relative select-none" onMouseLeave={() => setHoverIdx(null)}>
+        <svg viewBox={`0 0 ${W} ${H}`} className="h-auto max-h-[300px] w-full overflow-visible" role="img" aria-label={`分组对比柱状图（单位 ${unit}）`}>
+          {scale.steps.map((v) => {
+            const y = yAt(v);
+            return (
+              <g key={v}>
+                <line x1={pad.left} x2={W - pad.right} y1={y} y2={y} stroke="var(--line)" strokeDasharray={v === 0 ? undefined : '3 3'} />
+                <text x={pad.left - 8} y={y + 3.5} textAnchor="end" className="fill-muted text-[10px]">
+                  {fmtCompact(v)}
+                </text>
+              </g>
+            );
+          })}
+
+          {averageValue != null && (
+            <line
+              x1={pad.left}
+              x2={W - pad.right}
+              y1={yAt(averageValue)}
+              y2={yAt(averageValue)}
+              stroke="#FF7D00"
+              strokeWidth={1.3}
+              strokeDasharray="4 4"
+            />
+          )}
+
+          {items.map((it, i) => {
+            const cx = pad.left + i * slotW + slotW / 2;
+            const isSel = selectedId === it.id;
+            const isHov = hoverIdx === i;
+            const groupW = hasBaseline ? barW * 2 + barGap : barW;
+            const xCur = cx - groupW / 2;
+            const xBase = xCur + barW + barGap;
+            const rawLbl = it.shortLabel || it.label;
+            const lbl = rawLbl.length > 8 && items.length > 5 ? `${rawLbl.slice(0, 7)}…` : rawLbl;
+
+            return (
+              <g
+                key={it.id}
+                className={onSelect ? 'cursor-pointer' : undefined}
+                onMouseEnter={() => setHoverIdx(i)}
+                onClick={() => onSelect?.(it.id)}
+              >
+                {(isSel || isHov) && (
+                  <rect
+                    x={pad.left + i * slotW + 2}
+                    y={pad.top}
+                    width={Math.max(4, slotW - 4)}
+                    height={plotH}
+                    rx={2}
+                    fill={isSel ? '#165DFF' : 'var(--fill-2)'}
+                    fillOpacity={isSel ? 0.08 : 0.65}
+                  />
+                )}
+
+                {it.current != null ? (
+                  <rect
+                    x={xCur}
+                    y={yAt(it.current)}
+                    width={barW}
+                    height={Math.max(2, pad.top + plotH - yAt(it.current))}
+                    rx={2}
+                    fill={it.comparable === false ? '#FF7D00' : '#165DFF'}
+                    fillOpacity={isSel || isHov ? 1 : 0.88}
+                  />
+                ) : (
+                  <rect
+                    x={xCur}
+                    y={pad.top + plotH - 12}
+                    width={barW}
+                    height={12}
+                    rx={1}
+                    fill="none"
+                    stroke="#86909C"
+                    strokeDasharray="2 2"
+                  />
+                )}
+
+                {hasBaseline &&
+                  (it.baseline != null ? (
+                    <rect
+                      x={xBase}
+                      y={yAt(it.baseline)}
+                      width={barW}
+                      height={Math.max(2, pad.top + plotH - yAt(it.baseline))}
+                      rx={2}
+                      fill="#0FC6C2"
+                      fillOpacity={isSel || isHov ? 0.95 : 0.72}
+                    />
+                  ) : (
+                    <rect
+                      x={xBase}
+                      y={pad.top + plotH - 12}
+                      width={barW}
+                      height={12}
+                      rx={1}
+                      fill="none"
+                      stroke="#C9CDD4"
+                      strokeDasharray="2 2"
+                    />
+                  ))}
+
+                {items.length <= 8 && it.current != null && (
+                  <text
+                    x={xCur + barW / 2}
+                    y={yAt(it.current) - 5}
+                    textAnchor="middle"
+                    className={`text-[10px] ${isSel || isHov ? 'fill-fg font-semibold' : 'fill-fg-2'}`}
+                  >
+                    {fmtCompact(it.current)}
+                  </text>
+                )}
+
+                {i % labelStep === 0 && (
+                  <text
+                    x={cx}
+                    y={H - 16}
+                    textAnchor="middle"
+                    className={`text-[10px] ${isSel ? 'fill-primary font-semibold' : 'fill-muted'}`}
+                  >
+                    {lbl}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+        </svg>
+
+        <div className="mt-1 flex min-h-[26px] flex-wrap items-center justify-between gap-2 rounded-[2px] bg-fill-1 px-3 py-1 text-[11px]">
+          {activeItem ? (
+            <>
+              <span className="font-medium text-fg">
+                {activeItem.label}
+                {activeItem.reason && activeItem.comparable === false ? (
+                  <span className="ml-1.5 font-normal text-warning">({activeItem.reason})</span>
+                ) : null}
+              </span>
+              <div className="flex flex-wrap items-center gap-3">
+                <span>
+                  {currentLabel} <strong className="text-primary">{activeItem.current != null ? `${fmtVal(activeItem.current)} ${unit}` : '缺测'}</strong>
+                </span>
+                {hasBaseline && (
+                  <span>
+                    {baselineLabel} <strong className="text-fg-2">{activeItem.baseline != null ? `${fmtVal(activeItem.baseline)} ${unit}` : '缺测'}</strong>
+                  </span>
+                )}
+                {activeDelta != null && (
+                  <span className={activeDelta > 0 ? 'font-medium text-negative' : 'font-medium text-positive'}>
+                    差额 {activeDelta > 0 ? '+' : ''}{fmtVal(activeDelta)} {unit}
+                    {activeRate != null ? ` (${activeDelta > 0 ? '+' : ''}${pctFmt.format(activeRate)})` : ''}
+                  </span>
+                )}
+              </div>
+            </>
+          ) : (
+            <span className="text-muted">悬停或点击任意分组柱体查看精确对比数值与变化幅度</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── 18. AnomalyDistributionBarChart (F10 Exception Type & Terminal Frequency) ──
+
+export function AnomalyDistributionBarChart({
+  items,
+  height = 176,
+}: {
+  items: Array<{ key: string; label: string; count: number; kind: 'usage_candidate' | 'metering_quality' }>;
+  height?: number;
+}) {
+  if (items.length === 0) {
+    return (
+      <div className="flex h-[130px] items-center justify-center rounded-[4px] border border-dashed border-line bg-fill-1/40 text-[12px] text-muted">
+        当前观测窗口无异常事件分布记录
+      </div>
+    );
+  }
+
+  const maxCount = Math.max(...items.map((x) => x.count), 1);
+  const scale = niceScale(maxCount * 1.2, 3);
+  const W = 540;
+  const H = height;
+  const pad = { top: 22, right: 16, bottom: 34, left: 36 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+  const slotW = plotW / items.length;
+  const barW = Math.min(44, Math.max(14, slotW * 0.48));
+  const yAt = (v: number) => pad.top + plotH - (Math.max(0, v) / scale.max) * plotH;
+
+  return (
+    <div className="space-y-1.5 tabular">
+      <div className="flex items-center justify-between text-[11px] text-muted">
+        <span>异常事件分类频次分布（单位：次）</span>
+        <div className="flex items-center gap-3">
+          <span className="inline-flex items-center gap-1"><span className="size-2 rounded-[1px] bg-warning" />用能异常候选</span>
+          <span className="inline-flex items-center gap-1"><span className="size-2 rounded-[1px] bg-negative" />采集质量异常</span>
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="h-auto max-h-[190px] w-full overflow-visible" role="img" aria-label="异常事件分布柱状图">
+        {scale.steps.map((v) => {
+          const y = yAt(v);
+          return (
+            <g key={v}>
+              <line x1={pad.left} x2={W - pad.right} y1={y} y2={y} stroke="var(--line)" strokeDasharray={v === 0 ? undefined : '3 3'} />
+              <text x={pad.left - 6} y={y + 3.5} textAnchor="end" className="fill-muted text-[10px]">
+                {Math.round(v)}
+              </text>
+            </g>
+          );
+        })}
+        {items.map((it, i) => {
+          const cx = pad.left + i * slotW + slotW / 2;
+          const bx = cx - barW / 2;
+          const by = yAt(it.count);
+          const bh = Math.max(3, pad.top + plotH - by);
+          const fill = it.kind === 'usage_candidate' ? '#FF7D00' : '#F53F3F';
+          const shortLbl = it.label.length > 14 ? `${it.label.slice(0, 13)}…` : it.label;
+          return (
+            <g key={it.key}>
+              <rect x={bx} y={by} width={barW} height={bh} rx={2} fill={fill} fillOpacity={0.86} />
+              <text x={cx} y={by - 5} textAnchor="middle" className="fill-fg text-[11px] font-semibold">
+                {it.count}
+              </text>
+              <text x={cx} y={H - 12} textAnchor="middle" className="fill-fg-2 text-[10px]">
+                {shortLbl}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
     </div>
   );
 }

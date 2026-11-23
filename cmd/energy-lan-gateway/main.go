@@ -1,22 +1,23 @@
-// Command energy-lan-gateway provides a dedicated, fail-closed LAN reverse proxy
-// (default port 5177) for trusted Private-LAN simulated-data demonstrations.
+// Command energy-lan-gateway provides a dedicated, subnet-restricted, READ-ONLY
+// passwordless reverse-proxy entrypoint (default port 5177) for trusted private-LAN
+// demonstration of the Building Energy Management Workbench (F01-F25 simulated data).
 //
-// Security boundaries:
-// - Binds ONLY to a private RFC1918 IPv4 address (never 0.0.0.0 or public IPs).
-// - Keeps PostgreSQL (127.0.0.1:55432), Go API (127.0.0.1:18090), and Vite
-//   (127.0.0.1:5176) strictly loopback-only.
-// - Explicitly blocks /admin/v1/dev-auth/* and non-energy admin routes (403)
-//   so remote LAN clients can NEVER impersonate localhost dev auto-login.
-// - Requires passcode authentication (/lan-auth/login) mapped to a server-side
-//   HttpOnly session cookie before proxying any /admin/v1/energy-analysis/* API
-//   or CSV export.
+// Security boundaries (defense-in-depth):
+//  1. Refuses to bind to 0.0.0.0 or any non-RFC1918 IP address.
+//  2. Enforces client source IP whitelist (default 192.168.100.0/24; configurable via
+//     IOT_LAN_ALLOWED_CIDRS, rejecting non-RFC1918 CIDRs and rejecting outside clients with 403).
+//  3. Strictly READ-ONLY: only GET/HEAD requests to /admin/v1/energy-analysis/* are proxied;
+//     ALL write verbs (POST/PUT/PATCH/DELETE) are rejected with 403 at the gateway AND the
+//     server-held backend token is scoped strictly to the read-only viewer role
+//     (ReadUsage + ExportUsage + DownloadReport, ZERO ManageBindings).
+//  4. Blocks /admin/v1/dev-auth/* and all non-energy /admin/* routes with 403.
+//  5. Never exposes PostgreSQL (55432), Go API (18090), or Vite dev server (5176) directly.
+//  6. Pure Go stdlib implementation (no net/http/httputil dependency).
 package main
 
 import (
+	"bufio"
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,94 +34,44 @@ import (
 	"time"
 )
 
-const sessionCookieName = "iot_lan_session"
+const (
+	energyAPIPrefix       = "/admin/v1/energy-analysis"
+	defaultAllowedSubnets = "192.168.100.0/24"
+)
 
-type lanSession struct {
-	BearerToken string
-	Subject     string
-	CreatedAt   time.Time
-	ExpiresAt   time.Time
+type readonlyTokenCache struct {
+	mu        sync.Mutex
+	token     string
+	subject   string
+	expiresAt time.Time
 }
 
-type sessionStore struct {
-	mu       sync.RWMutex
-	sessions map[string]lanSession
-}
-
-func newSessionStore() *sessionStore {
-	return &sessionStore{sessions: make(map[string]lanSession)}
-}
-
-func (s *sessionStore) put(sess lanSession) (string, error) {
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
+func (c *readonlyTokenCache) get(ctx context.Context, backendBase string) (string, string, error) {
+	c.mu.Lock()
+	if c.token != "" && time.Now().UTC().Add(5*time.Minute).Before(c.expiresAt) {
+		tok, sub := c.token, c.subject
+		c.mu.Unlock()
+		return tok, sub, nil
 	}
-	id := hex.EncodeToString(buf)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now().UTC()
-	for k, v := range s.sessions {
-		if now.After(v.ExpiresAt) {
-			delete(s.sessions, k)
-		}
+	c.mu.Unlock()
+
+	tok, sub, exp, err := fetchReadOnlyBackendToken(ctx, backendBase)
+	if err != nil {
+		return "", "", err
 	}
-	s.sessions[id] = sess
-	return id, nil
+	c.mu.Lock()
+	c.token = tok
+	c.subject = sub
+	c.expiresAt = exp
+	c.mu.Unlock()
+	return tok, sub, nil
 }
 
-func (s *sessionStore) get(id string) (lanSession, bool) {
-	if id == "" {
-		return lanSession{}, false
-	}
-	s.mu.RLock()
-	sess, ok := s.sessions[id]
-	s.mu.RUnlock()
-	if !ok || time.Now().UTC().After(sess.ExpiresAt) {
-		if ok {
-			s.delete(id)
-		}
-		return lanSession{}, false
-	}
-	return sess, true
-}
-
-func (s *sessionStore) delete(id string) {
-	if id == "" {
-		return
-	}
-	s.mu.Lock()
-	delete(s.sessions, id)
-	s.mu.Unlock()
-}
-
-type loginRateLimiter struct {
-	mu       sync.Mutex
-	failures map[string][]time.Time
-}
-
-func newLoginRateLimiter() *loginRateLimiter {
-	return &loginRateLimiter{failures: make(map[string][]time.Time)}
-}
-
-func (l *loginRateLimiter) allow(ip string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	cutoff := time.Now().Add(-5 * time.Minute)
-	var kept []time.Time
-	for _, ts := range l.failures[ip] {
-		if ts.After(cutoff) {
-			kept = append(kept, ts)
-		}
-	}
-	l.failures[ip] = kept
-	return len(kept) < 10
-}
-
-func (l *loginRateLimiter) recordFailure(ip string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.failures[ip] = append(l.failures[ip], time.Now())
+func (c *readonlyTokenCache) invalidate() {
+	c.mu.Lock()
+	c.token = ""
+	c.expiresAt = time.Time{}
+	c.mu.Unlock()
 }
 
 func isPrivateLANIPv4(host string) bool {
@@ -132,7 +83,6 @@ func isPrivateLANIPv4(host string) bool {
 	if ip4 == nil || ip4.IsLoopback() || ip4.IsUnspecified() {
 		return false
 	}
-	// RFC1918 private LAN ranges only: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16.
 	if ip4[0] == 10 {
 		return true
 	}
@@ -145,65 +95,102 @@ func isPrivateLANIPv4(host string) bool {
 	return false
 }
 
-func loadPasscode() (string, error) {
-	if raw := strings.TrimSpace(os.Getenv("IOT_LAN_PASSCODE")); raw != "" {
-		if len(raw) < 8 {
-			return "", errors.New("IOT_LAN_PASSCODE must be at least 8 characters")
-		}
-		return raw, nil
+func parseAllowedCIDRs(raw string) ([]*net.IPNet, []string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = defaultAllowedSubnets
 	}
-	if path := strings.TrimSpace(os.Getenv("IOT_LAN_PASSCODE_FILE")); path != "" {
-		b, err := os.ReadFile(path)
+	var nets []*net.IPNet
+	var labels []string
+	for _, part := range strings.Split(raw, ",") {
+		p := strings.TrimSpace(part)
+		if p == "" {
+			continue
+		}
+		ip, ipNet, err := net.ParseCIDR(p)
 		if err != nil {
-			return "", fmt.Errorf("read IOT_LAN_PASSCODE_FILE: %w", err)
+			return nil, nil, fmt.Errorf("invalid CIDR %q: %w", p, err)
 		}
-		raw := strings.TrimSpace(string(b))
-		if len(raw) < 8 {
-			return "", errors.New("passcode in IOT_LAN_PASSCODE_FILE must be at least 8 characters")
+		ip4 := ip.To4()
+		if ip4 == nil || !isPrivateLANIPv4(ip4.String()) {
+			return nil, nil, fmt.Errorf("SAFETY GUARD: refusing non-private-LAN CIDR %q", p)
 		}
-		return raw, nil
+		ones, _ := ipNet.Mask.Size()
+		if ones < 16 {
+			return nil, nil, fmt.Errorf("SAFETY GUARD: CIDR %q is too broad (minimum /16 required)", p)
+		}
+		nets = append(nets, ipNet)
+		labels = append(labels, ipNet.String())
 	}
-	return "", errors.New("IOT_LAN_PASSCODE or IOT_LAN_PASSCODE_FILE is required")
+	if len(nets) == 0 {
+		return nil, nil, errors.New("at least one private LAN CIDR is required")
+	}
+	return nets, labels, nil
 }
 
-func fetchBackendToken(ctx context.Context, backendBase string) (token string, subject string, expiresAt time.Time, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(backendBase, "/")+"/admin/v1/dev-auth/session", nil)
+func isAllowedClientIP(remoteAddr string, allowed []*net.IPNet) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(remoteAddr))
+	if err != nil {
+		host = strings.TrimSpace(remoteAddr)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	for _, n := range allowed {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func fetchReadOnlyBackendToken(ctx context.Context, backendBase string) (token string, subject string, expiresAt time.Time, err error) {
+	endpoint := strings.TrimRight(backendBase, "/") + "/admin/v1/dev-auth/session?role=readonly"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
 		return "", "", time.Time{}, err
 	}
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", time.Time{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return "", "", time.Time{}, fmt.Errorf("backend token issue failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", "", time.Time{}, fmt.Errorf("backend readonly-session HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var payload struct {
 		Token     string `json:"token"`
 		Subject   string `json:"subject"`
+		Role      string `json:"role"`
 		ExpiresAt string `json:"expiresAt"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return "", "", time.Time{}, err
 	}
 	if payload.Token == "" {
-		return "", "", time.Time{}, errors.New("backend returned empty session token")
+		return "", "", time.Time{}, errors.New("backend returned empty token")
 	}
-	exp, err := time.Parse(time.RFC3339, payload.ExpiresAt)
-	if err != nil {
-		exp = time.Now().UTC().Add(4 * time.Hour)
+	exp := time.Now().UTC().Add(3 * time.Hour)
+	if parsed, pErr := time.Parse(time.RFC3339, payload.ExpiresAt); pErr == nil {
+		exp = parsed
+	}
+	if payload.Subject == "" {
+		payload.Subject = "local-viewer"
 	}
 	return payload.Token, payload.Subject, exp, nil
 }
 
-func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	if err := run(log); err != nil {
-		log.Error("energy-lan-gateway exited", "err", err)
-		os.Exit(1)
-	}
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 var hopByHopHeaders = map[string]bool{
@@ -225,7 +212,7 @@ func isWebSocketUpgrade(r *http.Request) bool {
 func proxyWebSocket(w http.ResponseWriter, r *http.Request, target *url.URL) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
-		http.Error(w, "websocket hijack unsupported", http.StatusBadGateway)
+		http.Error(w, "websocket hijack unsupported", http.StatusInternalServerError)
 		return
 	}
 	upConn, err := net.DialTimeout("tcp", target.Host, 5*time.Second)
@@ -235,46 +222,43 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, target *url.URL) {
 	}
 	defer upConn.Close()
 
-	clientConn, clientRW, err := hj.Hijack()
+	clientConn, clientBuf, err := hj.Hijack()
 	if err != nil {
 		return
 	}
 	defer clientConn.Close()
 
-	// Forward exact HTTP upgrade request to loopback Vite server with rewritten Host/Origin.
 	outReq := r.Clone(r.Context())
+	outReq.RequestURI = ""
 	outReq.URL.Scheme = target.Scheme
 	outReq.URL.Host = target.Host
 	outReq.Host = target.Host
-	outReq.RequestURI = ""
-	outReq.Header = r.Header.Clone()
-	if outReq.Header.Get("Origin") != "" {
-		outReq.Header.Set("Origin", target.Scheme+"://"+target.Host)
-	}
 	if err := outReq.Write(upConn); err != nil {
 		return
 	}
 
-	done := make(chan struct{}, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
-		_, _ = io.Copy(upConn, clientRW)
-		done <- struct{}{}
+		defer wg.Done()
+		if clientBuf != nil && clientBuf.Reader.Buffered() > 0 {
+			_, _ = io.CopyN(upConn, clientBuf, int64(clientBuf.Reader.Buffered()))
+		}
+		_, _ = io.Copy(upConn, clientConn)
 	}()
 	go func() {
+		defer wg.Done()
 		_, _ = io.Copy(clientConn, upConn)
-		done <- struct{}{}
 	}()
-	<-done
+	wg.Wait()
 }
 
-func newStdProxy(target *url.URL, rewriteOrigin bool) http.Handler {
-	tr := &http.Transport{
-		Proxy:               nil,
-		DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		MaxIdleConns:        64,
-		IdleConnTimeout:     60 * time.Second,
-		DisableCompression:  true,
-		ForceAttemptHTTP2:   false,
+func newStdProxy(target *url.URL, extraHeaders func(r *http.Request) http.Header) http.Handler {
+	transport := &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 8 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		MaxIdleConns:          64,
+		IdleConnTimeout:       60 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isWebSocketUpgrade(r) {
@@ -287,9 +271,12 @@ func newStdProxy(target *url.URL, rewriteOrigin bool) http.Handler {
 
 		outReq, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), r.Body)
 		if err != nil {
-			http.Error(w, "bad proxy request", http.StatusBadGateway)
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "build upstream request failed"})
 			return
 		}
+		outReq.ContentLength = r.ContentLength
+		outReq.Host = target.Host
+
 		for k, vals := range r.Header {
 			if hopByHopHeaders[http.CanonicalHeaderKey(k)] {
 				continue
@@ -298,14 +285,25 @@ func newStdProxy(target *url.URL, rewriteOrigin bool) http.Handler {
 				outReq.Header.Add(k, v)
 			}
 		}
-		outReq.Host = target.Host
-		if rewriteOrigin && outReq.Header.Get("Origin") != "" {
-			outReq.Header.Set("Origin", target.Scheme+"://"+target.Host)
+		outReq.Header.Del("Cookie")
+		outReq.Header.Del("Authorization")
+		if host, _, splitErr := net.SplitHostPort(r.RemoteAddr); splitErr == nil && host != "" {
+			outReq.Header.Set("X-Forwarded-For", host)
+		}
+		outReq.Header.Set("X-Forwarded-Host", r.Host)
+		outReq.Header.Set("X-Forwarded-Proto", "http")
+		if extraHeaders != nil {
+			for k, vals := range extraHeaders(r) {
+				outReq.Header.Del(k)
+				for _, v := range vals {
+					outReq.Header.Add(k, v)
+				}
+			}
 		}
 
-		resp, err := tr.RoundTrip(outReq)
+		resp, err := transport.RoundTrip(outReq)
 		if err != nil {
-			http.Error(w, "upstream unavailable", http.StatusBadGateway)
+			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "上游本地预览服务暂不可用"})
 			return
 		}
 		defer resp.Body.Close()
@@ -319,6 +317,21 @@ func newStdProxy(target *url.URL, rewriteOrigin bool) http.Handler {
 			}
 		}
 		w.WriteHeader(resp.StatusCode)
+		if fl, ok := w.(http.Flusher); ok && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+			reader := bufio.NewReader(resp.Body)
+			buf := make([]byte, 4096)
+			for {
+				n, rErr := reader.Read(buf)
+				if n > 0 {
+					_, _ = w.Write(buf[:n])
+					fl.Flush()
+				}
+				if rErr != nil {
+					break
+				}
+			}
+			return
+		}
 		_, _ = io.Copy(w, resp.Body)
 	})
 }
@@ -333,210 +346,139 @@ func run(log *slog.Logger) error {
 	}
 	host, _, err := net.SplitHostPort(listen)
 	if err != nil || !isPrivateLANIPv4(host) {
-		return fmt.Errorf("SAFETY GUARD: refusing non-private-LAN bind address %q (RFC1918 IPv4 only; never 0.0.0.0)", listen)
+		return fmt.Errorf("SAFETY GUARD: refusing non-private-LAN listen address %q", listen)
 	}
 
-	passcode, err := loadPasscode()
+	allowedNets, allowedLabels, err := parseAllowedCIDRs(os.Getenv("IOT_LAN_ALLOWED_CIDRS"))
 	if err != nil {
 		return err
 	}
 
-	backendTargetStr := strings.TrimSpace(os.Getenv("IOT_LAN_BACKEND_URL"))
-	if backendTargetStr == "" {
-		backendTargetStr = "http://127.0.0.1:18090"
+	frontendRaw := strings.TrimSpace(os.Getenv("IOT_LAN_FRONTEND_URL"))
+	if frontendRaw == "" {
+		frontendRaw = "http://127.0.0.1:5176"
 	}
-	frontendTargetStr := strings.TrimSpace(os.Getenv("IOT_LAN_FRONTEND_URL"))
-	if frontendTargetStr == "" {
-		frontendTargetStr = "http://127.0.0.1:5176"
+	backendRaw := strings.TrimSpace(os.Getenv("IOT_LAN_BACKEND_URL"))
+	if backendRaw == "" {
+		backendRaw = "http://127.0.0.1:18090"
+	}
+	frontendURL, err := url.Parse(frontendRaw)
+	if err != nil || (frontendURL.Hostname() != "127.0.0.1" && frontendURL.Hostname() != "localhost") {
+		return fmt.Errorf("SAFETY GUARD: frontend upstream must be loopback, got %q", frontendRaw)
+	}
+	backendURL, err := url.Parse(backendRaw)
+	if err != nil || (backendURL.Hostname() != "127.0.0.1" && backendURL.Hostname() != "localhost") {
+		return fmt.Errorf("SAFETY GUARD: backend upstream must be loopback, got %q", backendRaw)
 	}
 
-	backendURL, err := url.Parse(backendTargetStr)
-	if err != nil {
-		return fmt.Errorf("invalid IOT_LAN_BACKEND_URL: %w", err)
-	}
-	frontendURL, err := url.Parse(frontendTargetStr)
-	if err != nil {
-		return fmt.Errorf("invalid IOT_LAN_FRONTEND_URL: %w", err)
-	}
+	tokenCache := &readonlyTokenCache{}
+	frontendProxy := newStdProxy(frontendURL, nil)
+	backendProxy := newStdProxy(backendURL, func(r *http.Request) http.Header {
+		h := make(http.Header)
+		if tok, ok := r.Context().Value(ctxTokenKey{}).(string); ok && tok != "" {
+			h.Set("Authorization", "Bearer "+tok)
+		}
+		return h
+	})
 
-	apiProxy := newStdProxy(backendURL, false)
-	uiProxy := newStdProxy(frontendURL, true)
-
-	store := newSessionStore()
-	limiter := newLoginRateLimiter()
-
-	writeJSON := func(w http.ResponseWriter, status int, v any) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(v)
-	}
+	allowedSubnetSummary := strings.Join(allowedLabels, ", ")
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
-		w.Header().Set("Referrer-Policy", "same-origin")
+		// 1. Strict client subnet check (never open to public internet or other subnets).
+		if !isAllowedClientIP(r.RemoteAddr, allowedNets) {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error": "来源地址不在受信任局域网网段内，已拒绝访问",
+			})
+			return
+		}
 
 		p := r.URL.Path
 
-		// 1. Health check for startup script
-		if p == "/lan-healthz" && r.Method == http.MethodGet {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": "lan_demo_gateway"})
+		// 2. Security headers on every response.
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "same-origin")
+
+		// 3. Gateway health & read-only status metadata.
+		if p == "/lan-healthz" {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":           true,
+				"mode":         "lan_readonly_preview",
+				"listen":       listen,
+				"allowedCidrs": allowedLabels,
+				"readOnly":     true,
+			})
 			return
 		}
 
-		// 2. Root redirect to /ui/
-		if p == "/" {
-			http.Redirect(w, r, "/ui/", http.StatusTemporaryRedirect)
-			return
-		}
-
-		// 3. LAN Demo Passcode Auth Endpoints
-		if p == "/lan-auth/status" && r.Method == http.MethodGet {
-			cookie, _ := r.Cookie(sessionCookieName)
-			if cookie != nil {
-				if sess, ok := store.get(cookie.Value); ok {
-					writeJSON(w, http.StatusOK, map[string]any{
-						"lanGateway":    true,
-						"authenticated": true,
-						"subject":       sess.Subject,
-						"expiresAt":     sess.ExpiresAt.Format(time.RFC3339),
-					})
-					return
-				}
-			}
+		if p == "/lan-auth/status" {
 			writeJSON(w, http.StatusOK, map[string]any{
 				"lanGateway":    true,
-				"authenticated": false,
-			})
-			return
-		}
-
-		if p == "/lan-auth/login" && r.Method == http.MethodPost {
-			remoteIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-			if !limiter.allow(remoteIP) {
-				writeJSON(w, http.StatusTooManyRequests, map[string]any{
-					"code":    1,
-					"message": "口令尝试次数过多，请 5 分钟后重试",
-				})
-				return
-			}
-			var reqBody struct {
-				Passcode string `json:"passcode"`
-			}
-			if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&reqBody); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"code": 1, "message": "无效登录请求"})
-				return
-			}
-			given := strings.TrimSpace(reqBody.Passcode)
-			if len(given) != len(passcode) || subtle.ConstantTimeCompare([]byte(given), []byte(passcode)) != 1 {
-				limiter.recordFailure(remoteIP)
-				writeJSON(w, http.StatusUnauthorized, map[string]any{"code": 1, "message": "局域网演示口令错误"})
-				return
-			}
-			tok, sub, exp, err := fetchBackendToken(r.Context(), backendTargetStr)
-			if err != nil {
-				log.Error("failed to obtain backend session token after LAN login", "err", err)
-				writeJSON(w, http.StatusBadGateway, map[string]any{"code": 1, "message": "后端认证会话签发失败"})
-				return
-			}
-			sessID, err := store.put(lanSession{
-				BearerToken: tok,
-				Subject:     sub,
-				CreatedAt:   time.Now().UTC(),
-				ExpiresAt:   exp,
-			})
-			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"code": 1, "message": "会话创建失败"})
-				return
-			}
-			http.SetCookie(w, &http.Cookie{
-				Name:     sessionCookieName,
-				Value:    sessID,
-				Path:     "/",
-				HttpOnly: true,
-				SameSite: http.SameSiteLaxMode,
-				MaxAge:   int(time.Until(exp).Seconds()),
-			})
-			writeJSON(w, http.StatusOK, map[string]any{
-				"code":          0,
+				"mode":          "lan_readonly_preview",
 				"authenticated": true,
-				"subject":       sub,
-				"expiresAt":     exp.Format(time.RFC3339),
+				"readOnly":      true,
+				"allowedSubnet": allowedSubnetSummary,
+				"subject":       "local-viewer",
 			})
 			return
 		}
 
-		if p == "/lan-auth/logout" && r.Method == http.MethodPost {
-			if cookie, err := r.Cookie(sessionCookieName); err == nil && cookie != nil {
-				store.delete(cookie.Value)
-			}
-			http.SetCookie(w, &http.Cookie{
-				Name:     sessionCookieName,
-				Value:    "",
-				Path:     "/",
-				HttpOnly: true,
-				SameSite: http.SameSiteLaxMode,
-				MaxAge:   -1,
+		// Legacy login/logout endpoints return clear status instead of opening write auth.
+		if p == "/lan-auth/login" || p == "/lan-auth/logout" {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"lanGateway":    true,
+				"mode":          "lan_readonly_preview",
+				"authenticated": true,
+				"readOnly":      true,
+				"message":       "当前局域网入口已切换为可信网段免口令只读预览模式",
 			})
-			writeJSON(w, http.StatusOK, map[string]any{"code": 0, "authenticated": false})
 			return
 		}
 
-		// 4. Hard Security Boundary for /admin/*
-		if strings.HasPrefix(p, "/admin/") || p == "/admin" {
-			// NEVER allow LAN clients to hit loopback dev-auth endpoint!
-			if strings.HasPrefix(p, "/admin/v1/dev-auth") {
-				writeJSON(w, http.StatusForbidden, map[string]any{
-					"code":    1,
-					"message": "局域网入口禁止调用本地开发自动登录接口，请通过局域网演示口令认证",
-				})
-				return
-			}
-			// NEVER expose general IoT/gateway admin APIs on the LAN demo gateway!
-			if !strings.HasPrefix(p, "/admin/v1/energy-analysis") {
-				writeJSON(w, http.StatusForbidden, map[string]any{
-					"code":    1,
-					"message": "局域网演示入口仅开放建筑能耗监测分析接口",
-				})
-				return
-			}
-
-			// Require valid LAN session cookie OR explicit caller-supplied Bearer token.
-			authz := strings.TrimSpace(r.Header.Get("Authorization"))
-			hasBearer := len(authz) > 7 && strings.EqualFold(authz[:7], "Bearer ")
-			if !hasBearer {
-				cookie, _ := r.Cookie(sessionCookieName)
-				if cookie == nil {
-					writeJSON(w, http.StatusUnauthorized, map[string]any{
-						"code":    1,
-						"message": "局域网访问未通过演示口令认证（默认拒绝）",
-					})
-					return
-				}
-				sess, ok := store.get(cookie.Value)
-				if !ok {
-					writeJSON(w, http.StatusUnauthorized, map[string]any{
-						"code":    1,
-						"message": "局域网演示会话已失效，请重新输入口令登录",
-					})
-					return
-				}
-				// Inject server-held signed Bearer token on the proxied loopback request.
-				r2 := r.Clone(r.Context())
-				r2.Header = r.Header.Clone()
-				r2.Header.Set("Authorization", "Bearer "+sess.BearerToken)
-				r2.Header.Del("Cookie")
-				apiProxy.ServeHTTP(w, r2)
-				return
-			}
-
-			apiProxy.ServeHTTP(w, r)
+		// 4. Hard-block dev-auth & any non-energy admin endpoints.
+		if strings.HasPrefix(p, "/admin/v1/dev-auth") {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error": "局域网入口禁止直接访问开发自动登录接口",
+			})
+			return
+		}
+		if strings.HasPrefix(p, "/admin/") && !strings.HasPrefix(p, energyAPIPrefix) {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error": "局域网演示入口仅开放建筑能耗只读分析接口，管理与设备接口已隔离",
+			})
 			return
 		}
 
-		// 5. Same-Origin Frontend & Vite HMR WebSocket Proxy -> 127.0.0.1:5176
-		uiProxy.ServeHTTP(w, r)
+		// 5. Energy analysis API: STRICTLY READ-ONLY (GET/HEAD only) + server-side local-viewer JWT.
+		if strings.HasPrefix(p, energyAPIPrefix) {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				writeJSON(w, http.StatusForbidden, map[string]any{
+					"error": "局域网免口令演示模式仅开放只读预览与报表导出；配置修改、规则编辑、项目创建、基线锁定和考核确认请在主机 127.0.0.1:5176 开发模式或正式授权登录后操作",
+				})
+				return
+			}
+			tok, _, tokErr := tokenCache.get(r.Context(), backendRaw)
+			if tokErr != nil {
+				tokenCache.invalidate()
+				log.Error("fetch readonly backend token failed", "err", tokErr)
+				writeJSON(w, http.StatusBadGateway, map[string]any{
+					"error": "无法获取局域网只读预览凭据，请检查主机后端 127.0.0.1:18090 是否运行",
+				})
+				return
+			}
+			reqWithTok := r.WithContext(context.WithValue(r.Context(), ctxTokenKey{}, tok))
+			backendProxy.ServeHTTP(w, reqWithTok)
+			return
+		}
+
+		// 6. Root redirect directly to /ui/ energy workbench.
+		if p == "/" {
+			http.Redirect(w, r, "/ui/", http.StatusFound)
+			return
+		}
+
+		// 7. Proxy frontend Vite UI assets & SPA routes.
+		frontendProxy.ServeHTTP(w, r)
 	})
 
 	srv := &http.Server{
@@ -545,23 +487,30 @@ func run(log *slog.Logger) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	errCh := make(chan error, 1)
 	go func() {
-		log.Info("energy-lan-gateway listening (Private LAN demo only)",
-			"listen", listen,
-			"ui_url", fmt.Sprintf("http://%s/ui/", listen),
+		log.Info("energy-lan-gateway listening (passwordless read-only preview)",
+			"addr", listen,
+			"allowed_cidrs", allowedSubnetSummary,
+			"frontend", frontendRaw,
+			"backend", backendRaw,
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
+			log.Error("lan gateway error", "err", err)
 		}
 	}()
 
-	select {
-	case <-ctx.Done():
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return srv.Shutdown(shutCtx)
-	case err := <-errCh:
-		return err
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
+}
+
+type ctxTokenKey struct{}
+
+func main() {
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if err := run(log); err != nil {
+		log.Error("energy-lan-gateway exited", "err", err)
+		os.Exit(1)
 	}
 }

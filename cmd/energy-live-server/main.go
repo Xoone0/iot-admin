@@ -128,15 +128,23 @@ func run(log *slog.Logger) error {
 				return
 			}
 			now := time.Now().UTC()
+			requestedRole := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("role")))
 			sub := "local-admin"
-			if len(cfg.AdminSubjects) > 0 {
+			role := "admin"
+			if requestedRole == "readonly" || requestedRole == "viewer" {
+				role = "readonly"
+				sub = "local-viewer"
+				if len(cfg.ReadSubjects) > 0 {
+					sub = cfg.ReadSubjects[0]
+				}
+			} else if len(cfg.AdminSubjects) > 0 {
 				sub = cfg.AdminSubjects[0]
 			}
 			iss := cfg.Issuers[0]
 			tok, err := liveapi.SignHMACToken(liveapi.TokenClaims{
 				Issuer:    iss,
 				Subject:   sub,
-				SessionID: fmt.Sprintf("dev-sess-%d", now.UnixNano()),
+				SessionID: fmt.Sprintf("dev-sess-%s-%d", role, now.UnixNano()),
 				Audience:  cfg.Audience,
 				IssuedAt:  now.Add(-time.Minute).Unix(),
 				ExpiresAt: now.Add(4 * time.Hour).Unix(),
@@ -150,6 +158,7 @@ func run(log *slog.Logger) error {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"token":     tok,
 				"subject":   sub,
+				"role":      role,
 				"issuer":    iss,
 				"expiresAt": now.Add(4 * time.Hour).Format(time.RFC3339),
 			})

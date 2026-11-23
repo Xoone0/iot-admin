@@ -239,9 +239,9 @@ if (Test-HttpOk -Url $uiUrl) {
   Write-Host "[OK] Vite 前端预览已启动 ($uiUrl)" -ForegroundColor Green
 }
 
-# 4. Optional Dedicated LAN Reverse-Proxy Gateway (Port 5177, Passcode-Protected)
+# 4. Optional Dedicated LAN Reverse-Proxy Gateway (Port 5177, Passwordless Read-Only on Private Subnet)
 $lanUrl = $null
-$passcodeFilePath = $null
+$lanSubnet = $null
 if ($EnableLan) {
   $lan = Get-PrivateLanInfo
   if (-not $lan) {
@@ -249,12 +249,12 @@ if ($EnableLan) {
     exit 1
   }
 
-  $passcodeFilePath = Ensure-LanPasscodeFile
+  $lanSubnet = $lan.Subnet
   $lanHealthUrl = "http://$($lan.IPAddress):$LanPort/lan-healthz"
   $lanUrl = "http://$($lan.IPAddress):$LanPort/ui/"
 
   if (Test-HttpOk -Url $lanHealthUrl) {
-    Write-Host "[OK] 局域网专用网关 ($($lan.IPAddress):$LanPort) 已在运行，直接复用" -ForegroundColor Green
+    Write-Host "[OK] 局域网免口令只读网关 ($($lan.IPAddress):$LanPort) 已在运行，直接复用" -ForegroundColor Green
   } else {
     if (Test-TcpPort -HostName $lan.IPAddress -Port $LanPort) {
       Write-Error "端口 $($lan.IPAddress):$LanPort 已被其他进程占用，请指定 -LanPort 或释放端口。"
@@ -264,7 +264,7 @@ if ($EnableLan) {
     $gwExe = Join-Path $env:TEMP "energy-lan-gateway.exe"
     $goExe = Find-GoExe
     if ($goExe) {
-      Write-Host "[..] 正在编译局域网专用代理网关 ($gwExe)..." -ForegroundColor Yellow
+      Write-Host "[..] 正在编译局域网只读代理网关 ($gwExe)..." -ForegroundColor Yellow
       Push-Location $RepoRoot
       try {
         & $goExe build -o $gwExe ./cmd/energy-lan-gateway
@@ -278,7 +278,7 @@ if ($EnableLan) {
     }
 
     $env:IOT_LAN_LISTEN = "$($lan.IPAddress):$LanPort"
-    $env:IOT_LAN_PASSCODE_FILE = $passcodeFilePath
+    $env:IOT_LAN_ALLOWED_CIDRS = $lan.Subnet
     $env:IOT_LAN_BACKEND_URL = "http://127.0.0.1:$BackendPort"
     $env:IOT_LAN_FRONTEND_URL = "http://127.0.0.1:$FrontendPort"
 
@@ -296,7 +296,7 @@ if ($EnableLan) {
       Write-Error "局域网网关启动超时，请查看日志：$gwErr"
       exit 1
     }
-    Write-Host "[OK] 局域网专用网关已启动 ($lanUrl) · 网卡 $($lan.InterfaceAlias) [$($lan.NetworkCategory)]" -ForegroundColor Green
+    Write-Host "[OK] 局域网免口令只读网关已启动 ($lanUrl) · 仅限可信网段 $($lan.Subnet) [$($lan.InterfaceAlias)]" -ForegroundColor Green
   }
 
   # Windows Firewall rule check (Private profile + local LAN subnet ONLY; never Public/Any!)
@@ -318,10 +318,10 @@ if ($EnableLan) {
 }
 
 Write-Host ""
-Write-Host "本机预览地址：$uiUrl" -ForegroundColor Cyan
+Write-Host "本机开发预览（完整读写）：$uiUrl" -ForegroundColor Cyan
 if ($lanUrl) {
-  Write-Host "局域网演示地址：$lanUrl" -ForegroundColor Cyan
-  Write-Host "局域网口令文件：$passcodeFilePath（未入 Git，未写入日志；请通过 Get-Content 查看后输入）" -ForegroundColor DarkYellow
-  Write-Host "安全提示：当前 HTTP 入口仅用于可信局域网临时模拟数据演示；生产/真实数据须采用 HTTPS 与正式认证。" -ForegroundColor DarkGray
+  Write-Host "局域网免口令预览（只读受限）：$lanUrl" -ForegroundColor Cyan
+  Write-Host "访问控制：仅允许可信局域网网段 $lanSubnet 访问模拟数据与报表导出；配置/规则/项目/锁定/考核写入一律 403 拦截。" -ForegroundColor DarkYellow
+  Write-Host "安全提示：当前 HTTP 入口仅用于可信局域网临时模拟数据演示；生产/真实数据须采用 HTTPS 与正式多用户认证。" -ForegroundColor DarkGray
 }
 Write-Host "运行日志目录：$LogDir" -ForegroundColor DarkGray

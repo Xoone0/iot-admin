@@ -19,7 +19,6 @@ import {
   type ReportColumn,
   type SourceTrace,
 } from '../api/energyLive';
-import { CHART_PALETTE } from './EnergyCharts';
 import { fmtShanghaiDate } from './EnergyWorkspaceChrome';
 
 export type ReportSection =
@@ -160,6 +159,7 @@ export function EnergyReportStudio({
   const [downloading, setDownloading] = useState<boolean>(false);
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortAsc, setSortAsc] = useState<boolean>(false);
+  const [searchQuery, setSearchQuery] = useState<string>('');
   const [pageIdx, setPageIdx] = useState<number>(0);
   const [pageSize, setPageSize] = useState<number>(20);
 
@@ -184,6 +184,7 @@ export function EnergyReportStudio({
   useEffect(() => {
     setPageIdx(0);
     setSortKey(null);
+    setSearchQuery('');
     setF21EnergyTab('all');
     setF21DrillCat(null);
     setF23Group('all');
@@ -399,17 +400,31 @@ export function EnergyReportStudio({
 
   // ── Filtered + Sorted + Paginated Table Rows (Zero Mutated Calculations!) ──
   const filteredRows = useMemo(() => {
+    let list = rawRows;
     if (section === 'report-consumption' && f21EnergyTab !== 'all') {
-      return rawRows.filter((r) => r.energy === f21EnergyTab);
+      list = list.filter((r) => r.energy === f21EnergyTab);
     }
     if (section === 'report-assessment' && f23Group !== 'all') {
-      return rawRows.filter((r) => classifyAssessmentRow(r) === f23Group);
+      list = list.filter((r) => classifyAssessmentRow(r) === f23Group);
     }
     if (section === 'report-retrofit' && f24StatusFilter !== 'all') {
-      return rawRows.filter((r) => r.mv_status === f24StatusFilter);
+      list = list.filter((r) => r.mv_status === f24StatusFilter);
     }
-    return rawRows;
-  }, [section, rawRows, f21EnergyTab, f23Group, f24StatusFilter]);
+    const q = searchQuery.trim().toLowerCase();
+    if (q) {
+      list = list.filter((r) =>
+        columns.some((c) => {
+          const val = (r[c.key] ?? '').toLowerCase();
+          if (val.includes(q)) return true;
+          if (c.key === 'energy' && (energyLabels[r[c.key] ?? ''] ?? '').toLowerCase().includes(q)) return true;
+          const badge = statusBadges[r[c.key] ?? ''];
+          if (badge && badge.label.toLowerCase().includes(q)) return true;
+          return false;
+        }),
+      );
+    }
+    return list;
+  }, [section, rawRows, f21EnergyTab, f23Group, f24StatusFilter, searchQuery, columns]);
 
   const sortedRows = useMemo(() => {
     const copy = [...filteredRows];
@@ -606,9 +621,9 @@ export function EnergyReportStudio({
 
         {/* ── 2. Tailored Core Summary & Necessary Compact Visual per Report (F21–F25) ── */}
 
-        {/* F21: 5-Energy Independent Out-of-Table Switcher & Composition Bar */}
+        {/* F21: Compact 5-Energy Native-Unit Switcher Ribbon (Table-First Report Layout) */}
         {section === 'report-consumption' && f21EnergySummaries.length > 0 && (
-          <div className="space-y-4 p-5 tabular">
+          <div className="space-y-3 px-5 py-3.5 tabular">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex flex-wrap items-center gap-1.5 text-[12px]" role="tablist" aria-label="按能源分别出表预览">
                 <button
@@ -626,87 +641,42 @@ export function EnergyReportStudio({
                       : 'border-line bg-surface text-fg-2 hover:bg-fill-1'
                   }`}
                 >
-                  全部五能源分列 ({rawRows.length} 行)
+                  全部五能源 ({rawRows.length} 行)
                 </button>
-                {f21EnergySummaries.map((es) => (
-                  <button
-                    key={es.energy}
-                    type="button"
-                    role="tab"
-                    aria-selected={f21EnergyTab === es.energy}
-                    data-f21-energy={es.energy}
-                    onClick={() => {
-                      setF21EnergyTab(es.energy);
-                      setPageIdx(0);
-                    }}
-                    className={`rounded-[2px] border px-2.5 py-1 transition-colors ${
-                      f21EnergyTab === es.energy
-                        ? 'border-primary bg-primary font-medium text-white'
-                        : 'border-line bg-surface text-fg-2 hover:bg-fill-1'
-                    }`}
-                  >
-                    {energyLabels[es.energy] ?? es.energy} ({es.unit})
-                  </button>
-                ))}
+                {f21EnergySummaries.map((es) => {
+                  const isSel = f21EnergyTab === es.energy;
+                  return (
+                    <button
+                      key={es.energy}
+                      type="button"
+                      role="tab"
+                      aria-selected={isSel}
+                      data-f21-energy={es.energy}
+                      onClick={() => {
+                        setF21EnergyTab(es.energy);
+                        setPageIdx(0);
+                      }}
+                      className={`inline-flex items-center gap-1.5 rounded-[2px] border px-2.5 py-1 transition-colors ${
+                        isSel
+                          ? 'border-primary bg-primary-soft font-medium text-primary'
+                          : 'border-line bg-surface text-fg-2 hover:bg-fill-1'
+                      }`}
+                    >
+                      <span>{energyLabels[es.energy] ?? es.energy}</span>
+                      <strong className="font-semibold text-fg">{es.totalRow?.usage ?? '—'}</strong>
+                      <span className="text-[10px] text-muted">{es.unit}</span>
+                    </button>
+                  );
+                })}
               </div>
               <span className="text-[11px] text-muted">
-                父汇总行（TOTAL）与子分项行已视觉分离，严禁跨物理单位相加或父子重复累计
+                父汇总（TOTAL）与子分项已严格分离，严禁跨物理单位相加或父子重复累计
               </span>
-            </div>
-
-            {/* 5-Energy Native-Unit Summary Cards */}
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-              {f21EnergySummaries.map((es) => {
-                const isSel = f21EnergyTab === es.energy;
-                const totalUsage = es.totalRow?.usage ?? '—';
-                const cov = es.totalRow?.coverage_rate ?? '—';
-                const topSub = [...es.subRows].sort((a, b) => (parseNum(b.usage) ?? 0) - (parseNum(a.usage) ?? 0))[0];
-                return (
-                  <button
-                    key={es.energy}
-                    type="button"
-                    onClick={() => setF21EnergyTab((cur) => (cur === es.energy ? 'all' : es.energy))}
-                    className={`rounded-[4px] border p-3.5 text-left transition-colors ${
-                      isSel ? 'border-primary/50 bg-primary-soft/30' : 'border-line bg-surface hover:bg-fill-1/60'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between text-[12px]">
-                      <span className="font-medium text-fg-2">{energyLabels[es.energy] ?? es.energy}</span>
-                      <span className="rounded-[2px] bg-positive-soft px-1.5 py-0 text-[10px] text-positive">{cov}</span>
-                    </div>
-                    <p className="mt-1.5 text-[20px] font-semibold leading-[26px] text-fg">
-                      {totalUsage} <span className="text-[11px] font-normal text-muted">{es.unit}</span>
-                    </p>
-                    {/* Proportional native-unit micro stacked bar */}
-                    <div className="mt-2 flex h-[6px] w-full overflow-hidden rounded-[2px] bg-fill-2">
-                      {es.subRows.map((sr, si) => {
-                        const pct = parseNum(sr.share) ?? 0;
-                        return (
-                          <div
-                            key={sr.category_id}
-                            title={`${sr.category_name}: ${sr.usage} ${sr.unit} (${sr.share})`}
-                            style={{
-                              width: `${Math.max(2, pct)}%`,
-                              backgroundColor:
-                                sr.category_id === 'UNCLASSIFIED'
-                                  ? '#C9CDD4'
-                                  : CHART_PALETTE[si % (CHART_PALETTE.length - 1)],
-                            }}
-                          />
-                        );
-                      })}
-                    </div>
-                    <p className="mt-1.5 truncate text-[11px] text-muted">
-                      {topSub ? `主力：${topSub.category_name} (${topSub.share})` : `${es.subRows.length} 个分项`}
-                    </p>
-                  </button>
-                );
-              })}
             </div>
 
             {/* On-demand Category -> Metering Source Drilldown Drawer (when user clicks a category row in table) */}
             {f21DrillCat && (
-              <div className="rounded-[4px] border border-primary/35 bg-primary-soft/20 p-4 text-[12px]">
+              <div className="rounded-[4px] border border-primary/35 bg-primary-soft/20 p-3.5 text-[12px]">
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <span className="font-medium text-fg">
@@ -856,9 +826,9 @@ export function EnergyReportStudio({
           </div>
         )}
 
-        {/* F23: Assessment Report Tier Grouping & Unconfirmed Warning */}
+        {/* F23: Compact Assessment Tier Audit Strip (Table-First Report Layout) */}
         {section === 'report-assessment' && f23Summary && (
-          <div className="space-y-3.5 p-5 tabular">
+          <div className="space-y-2.5 px-5 py-3.5 tabular">
             {(f23Summary.pending > 0 || f23Summary.appealed > 0) && (
               <div className="flex flex-wrap items-center gap-2 rounded-[4px] border border-warning/35 bg-warning-soft/55 px-3.5 py-2 text-[12px] text-warning">
                 <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
@@ -868,86 +838,44 @@ export function EnergyReportStudio({
               </div>
             )}
 
-            {/* Compact Score Tier Distribution Bar + Interactive Group Filter */}
-            <div className="grid gap-4 lg:grid-cols-12">
-              <div className="rounded-[4px] border border-line bg-surface p-4 lg:col-span-8">
-                <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 text-[12px]">
-                  <span className="font-medium text-fg">考核对象分档分布摘要（点击分档筛选明细表）</span>
-                  <span className="text-[11px] text-muted">
-                    已确认 {f23Summary.confirmed} · 待复核 {f23Summary.pending} · 申诉中 {f23Summary.appealed}
-                  </span>
-                </div>
-
-                {/* Single clean proportional bar across the 5 assessment groups */}
-                <div className="mb-3 flex h-[12px] w-full overflow-hidden rounded-[2px] bg-fill-2">
-                  {(['excellent', 'qualified', 'rectify', 'exempt', 'blocked'] as const).map((g) => {
-                    const cnt = f23Summary.counts[g];
-                    if (cnt <= 0 || rawRows.length === 0) return null;
-                    return (
-                      <div
-                        key={g}
-                        title={`${assessmentGroupLabels[g].label}: ${cnt} 项`}
-                        style={{
-                          width: `${(cnt / rawRows.length) * 100}%`,
-                          backgroundColor: assessmentGroupLabels[g].dot,
-                        }}
-                      />
-                    );
-                  })}
-                </div>
-
-                <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-[4px] border border-line bg-fill-1/40 px-3.5 py-2 text-[11px]">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  data-f23-group="all"
+                  onClick={() => {
+                    setF23Group('all');
+                    setPageIdx(0);
+                  }}
+                  className={`rounded-[2px] border px-2.5 py-0.5 transition-colors ${
+                    f23Group === 'all' ? 'border-primary bg-primary font-medium text-white' : 'border-line bg-surface text-fg-2 hover:bg-fill-1'
+                  }`}
+                >
+                  全部对象 ({rawRows.length})
+                </button>
+                {(['excellent', 'qualified', 'rectify', 'exempt', 'blocked'] as const).map((g) => (
                   <button
+                    key={g}
                     type="button"
-                    data-f23-group="all"
+                    data-f23-group={g}
                     onClick={() => {
-                      setF23Group('all');
+                      setF23Group(g);
                       setPageIdx(0);
                     }}
-                    className={`rounded-[2px] border px-2.5 py-1 transition-colors ${
-                      f23Group === 'all' ? 'border-primary bg-primary font-medium text-white' : 'border-line bg-surface text-fg-2 hover:bg-fill-1'
+                    className={`inline-flex items-center gap-1.5 rounded-[2px] border px-2 py-0.5 transition-colors ${
+                      f23Group === g ? 'border-primary bg-primary-soft font-medium text-primary' : 'border-line bg-surface text-fg-2 hover:bg-fill-1'
                     }`}
                   >
-                    全部对象 ({rawRows.length})
+                    <span className="size-2 rounded-full" style={{ backgroundColor: assessmentGroupLabels[g].dot }} />
+                    <span>{assessmentGroupLabels[g].label}</span>
+                    <span className="font-semibold text-fg">{f23Summary.counts[g]}</span>
                   </button>
-                  {(['excellent', 'qualified', 'rectify', 'exempt', 'blocked'] as const).map((g) => (
-                    <button
-                      key={g}
-                      type="button"
-                      data-f23-group={g}
-                      onClick={() => {
-                        setF23Group(g);
-                        setPageIdx(0);
-                      }}
-                      className={`inline-flex items-center gap-1.5 rounded-[2px] border px-2.5 py-1 transition-colors ${
-                        f23Group === g ? 'border-primary bg-primary-soft font-medium text-primary' : 'border-line bg-surface text-fg-2 hover:bg-fill-1'
-                      }`}
-                    >
-                      <span className="size-2 rounded-full" style={{ backgroundColor: assessmentGroupLabels[g].dot }} />
-                      <span>{assessmentGroupLabels[g].label}</span>
-                      <span className="font-semibold text-fg">{f23Summary.counts[g]}</span>
-                    </button>
-                  ))}
-                </div>
+                ))}
               </div>
-
-              <div className="flex flex-col justify-between rounded-[4px] border border-line bg-fill-1/40 p-4 text-[12px] lg:col-span-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-fg-2">复核完成进度</span>
-                  <span className="font-semibold text-fg">
-                    {f23Summary.confirmed} / {rawRows.length} 项已确认
-                  </span>
-                </div>
-                <div className="my-2 h-[6px] w-full overflow-hidden rounded-full bg-fill-2">
-                  <div
-                    className="h-full rounded-full bg-positive"
-                    style={{ width: `${rawRows.length > 0 ? (f23Summary.confirmed / rawRows.length) * 100 : 0}%` }}
-                  />
-                </div>
-                <p className="text-[11px] text-muted">
-                  包含确认说明与复核申诉完整追溯记录；低覆盖阻断项禁止出分与确认。
-                </p>
-              </div>
+              <span className="text-muted">
+                复核进度 <strong className="text-fg">{f23Summary.confirmed}/{rawRows.length}</strong> 已确认
+                {f23Summary.weightedCount > 0 ? ` · 有效加权分合计 ${fmtNum(f23Summary.weightedSum)}` : ''}
+              </span>
             </div>
           </div>
         )}
@@ -1194,25 +1122,50 @@ export function EnergyReportStudio({
         )}
       </section>
 
-      {/* ── 3. Precision Enterprise Data Table (Right-Aligned Numerics, Clear Row Hierarchy, Pagination) ── */}
+      {/* ── 3. Precision Enterprise Data Table (Selectable Text, Live Search, Right-Aligned Numerics, Summary Footer, Pagination) ── */}
       <section aria-label="正式报表精确数据表" className="arco-card overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-3 text-[12px] tabular">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-[14px] font-medium text-fg">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h2 className="text-[14px] font-semibold text-fg">
               报表精确数据明细
               <span className="ml-2 text-[12px] font-normal text-muted">
                 当前显示 {sortedRows.length} 行{isFilteredLocally ? `（全表 ${rawRows.length} 行，导出 CSV 含全量授权记录）` : ''}
               </span>
             </h2>
             {section === 'report-consumption' && (
-              <span className="text-[11px] text-primary">点击任意分项行可展开上方计量来源下钻</span>
+              <span className="text-[11px] text-primary">点击任意分项行展开计量来源（拖拽划词可直接复制数值）</span>
             )}
           </div>
 
           <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted">
+            <input
+              type="search"
+              data-report-search
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setPageIdx(0);
+              }}
+              placeholder="筛选名称 / 能源 / 状态…"
+              aria-label="筛选报表数据行"
+              className="arco-input !h-7 w-44 text-[11px]"
+            />
+            {(sortKey || searchQuery) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSortKey(null);
+                  setSearchQuery('');
+                  setPageIdx(0);
+                }}
+                className="h-7 rounded-[2px] border border-line bg-surface px-2 text-[11px] text-fg-2 hover:bg-fill-1"
+              >
+                重置排序/筛选
+              </button>
+            )}
             {canScrollH && (
               <div className="inline-flex items-center gap-1 rounded-[2px] border border-line bg-fill-1/60 px-2 py-0.5 text-[11px] text-fg-2">
-                <span>宽表横向滚动（{columns.length} 列）</span>
+                <span>宽表滚动（{columns.length} 列）</span>
                 <button
                   type="button"
                   aria-label="表格向左滚动"
@@ -1239,7 +1192,7 @@ export function EnergyReportStudio({
                 setPageSize(Number(e.target.value));
                 setPageIdx(0);
               }}
-              className="arco-input !h-6 min-w-[64px] text-[11px]"
+              className="arco-input !h-7 min-w-[68px] text-[11px]"
             >
               <option value={10}>10 行</option>
               <option value={20}>20 行</option>
@@ -1248,28 +1201,32 @@ export function EnergyReportStudio({
           </div>
         </div>
 
-        <div ref={tableWrapRef} className="overflow-x-auto">
-          <table className="w-full border-collapse text-left text-[12px]">
-            <thead className="sticky top-0 z-10 border-b border-line bg-fill-1 text-fg-2">
+        <div ref={tableWrapRef} className="w-full overflow-x-auto">
+          <table data-report-table={section} className="w-full min-w-max border-collapse text-left text-[12px]">
+            <thead className="sticky top-0 z-10 border-b border-line-strong bg-fill-1 text-fg-2">
               <tr>
                 {columns.map((c) => {
                   const isNum = NUMERIC_KEYS.has(c.key);
                   const dense = columns.length >= 14;
+                  const activeSort = sortKey === c.key;
                   return (
                     <th
                       key={c.key}
-                      className={`whitespace-nowrap ${dense ? 'px-2.5 py-2' : 'px-3.5 py-2.5'} font-medium ${isNum ? 'text-right' : 'text-left'}`}
+                      scope="col"
+                      className={`whitespace-nowrap border-r border-line/60 last:border-r-0 ${dense ? 'px-2.5 py-2.5' : 'px-3.5 py-2.5'} font-medium ${isNum ? 'text-right' : 'text-left'}`}
                     >
                       <button
                         type="button"
+                        data-sort-col={c.key}
                         onClick={() => handleSort(c.key)}
-                        className={`inline-flex items-center gap-1 hover:text-fg ${isNum ? 'flex-row-reverse' : ''}`}
+                        className={`inline-flex items-center gap-1 hover:text-fg ${isNum ? 'flex-row-reverse' : ''} ${activeSort ? 'font-semibold text-primary' : ''}`}
                       >
                         <span>{c.label}</span>
-                        <ArrowUpDown
-                          className={`h-3 w-3 shrink-0 ${sortKey === c.key ? 'text-primary' : 'opacity-35'}`}
-                          aria-hidden="true"
-                        />
+                        {activeSort ? (
+                          <span className="text-[10px] leading-none">{sortAsc ? '↑' : '↓'}</span>
+                        ) : (
+                          <ArrowUpDown className="h-3 w-3 shrink-0 opacity-35" aria-hidden="true" />
+                        )}
                       </button>
                     </th>
                   );
@@ -1301,6 +1258,7 @@ export function EnergyReportStudio({
                     <tr
                       key={rIdx}
                       onClick={() => {
+                        if (window.getSelection()?.toString()) return;
                         if (isDrillable) {
                           setF21DrillCat({
                             energy: row.energy,
@@ -1315,10 +1273,12 @@ export function EnergyReportStudio({
                         isDrilled
                           ? 'bg-primary-soft/45'
                           : isTotalRow
-                            ? 'bg-fill-1/75 font-semibold'
+                            ? 'bg-fill-1/80 font-semibold'
                             : isAlertRow
                               ? 'bg-warning-soft/20 hover:bg-warning-soft/35'
-                              : 'hover:bg-fill-1/50'
+                              : rIdx % 2 === 1
+                                ? 'bg-fill-1/20 hover:bg-fill-1/55'
+                                : 'bg-surface hover:bg-fill-1/50'
                       }`}
                     >
                       {columns.map((c) => {
@@ -1328,7 +1288,7 @@ export function EnergyReportStudio({
                         return (
                           <td
                             key={c.key}
-                            className={`${dense ? 'px-2.5 py-2' : 'px-3.5 py-2.5'} ${
+                            className={`border-r border-line/40 last:border-r-0 ${dense ? 'px-2.5 py-2' : 'px-3.5 py-2.5'} ${
                               isNum
                                 ? 'whitespace-nowrap text-right'
                                 : isLongNote
@@ -1347,6 +1307,32 @@ export function EnergyReportStudio({
                 })
               )}
             </tbody>
+            {columns.length > 0 && sortedRows.length > 0 && (
+              <tfoot className="border-t-2 border-line-strong bg-fill-1/75 text-[11px] font-medium text-fg-2 tabular">
+                <tr>
+                  <td colSpan={columns.length} className="px-4 py-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span>
+                        {section === 'report-consumption' &&
+                          `汇总校验：当前展示 ${sortedRows.length} 行（含分能源 TOTAL 汇总行）；电 (kWh)、水 (m³)、气 (Nm³)、热/冷 (GJ) 物理单位独立，严禁跨能源相加。`}
+                        {section === 'report-metrics' &&
+                          f22Summary &&
+                          `汇总校验：已计算 ${f22Summary.ready} 项 · 缺分母 ${f22Summary.missingDenom} 项 · 低于上限 ${f22Summary.within} 项 · 超出上限 ${f22Summary.exceeds} 项（多单位指标不跨单位求和）。`}
+                        {section === 'report-assessment' &&
+                          f23Summary &&
+                          `汇总校验：共 ${sortedRows.length} 个考核对象 · 已确认 ${f23Summary.confirmed} 项 · 有效加权分合计 ${f23Summary.weightedCount > 0 ? fmtNum(f23Summary.weightedSum) : '—'}。`}
+                        {section === 'report-retrofit' &&
+                          f24Summary &&
+                          `汇总校验：纳入 ${sortedRows.length} 个改造项目 · 已核验 ${f24Summary.verified.length} 项 · 已核验参考减碳合计 ${fmtNum(f24Summary.totalVerifiedCarbon)} kgCO₂e（仅统计已核验项）。`}
+                        {section === 'report-custom' &&
+                          `汇总校验：当前白名单输出 ${columns.length} 列 × ${sortedRows.length} 行，表头顺序与 CSV 导出严格一致。`}
+                      </span>
+                      <span className="text-muted">支持划词复制数值 · 点击表头排序 · 导出 CSV 与预览逐列一致</span>
+                    </div>
+                  </td>
+                </tr>
+              </tfoot>
+            )}
           </table>
         </div>
 

@@ -1402,8 +1402,13 @@ export function RetrofitWorkspace({
           pCapex !== (active.capexBudget || 0);
 
         const annBase = active.annualizedBaselineUsage != null && active.annualizedBaselineUsage > 0 ? active.annualizedBaselineUsage : null;
-        const calcRate = (sav: number, serverVal?: number | null) =>
-          !isDirty && serverVal != null ? serverVal : annBase != null ? sav / annBase : null;
+        const exceedsBase = (sav: number) => annBase != null && sav > annBase;
+        // Strict physical baseline boundary check: NEVER output an effective savings rate > 100% when savings exceed baseline!
+        const calcRate = (sav: number, serverVal?: number | null) => {
+          if (exceedsBase(sav)) return null;
+          const raw = !isDirty && serverVal != null ? serverVal : annBase != null ? sav / annBase : null;
+          return raw != null && raw <= 1 ? raw : null;
+        };
         const calcCost = (sav: number, serverVal?: number | null) =>
           !isDirty && active.priceConfigured && serverVal != null ? serverVal : pPriceConfigured && sav > 0 ? sav * pPrice : null;
         const calcPayback = (cost: number | null, serverVal?: number | null) =>
@@ -1421,7 +1426,9 @@ export function RetrofitWorkspace({
         const pbBase = calcPayback(costBase, active.staticPaybackYears);
         const pbHigh = calcPayback(costHigh, active.staticPaybackHighYears);
 
-        const postBaseUsage = annBase != null ? Math.max(0, annBase - pBase) : null;
+        const baseExceedsPhysical = exceedsBase(pBase);
+        const anyExceedsPhysical = exceedsBase(pLow) || baseExceedsPhysical || exceedsBase(pHigh);
+        const postBaseUsage = annBase != null && !baseExceedsPhysical ? annBase - pBase : null;
 
         return (
           <div className="space-y-4">
@@ -1450,10 +1457,16 @@ export function RetrofitWorkspace({
                 </span>
                 <span>
                   <span className="text-muted">基准节能量：</span>
-                  <strong className="font-semibold text-primary">
+                  <strong className={`font-semibold ${baseExceedsPhysical ? 'text-negative' : 'text-primary'}`}>
                     {fmtNum(pBase)} {active.unit}
                   </strong>
-                  {rateBase != null && <span className="ml-1 text-[11px] text-positive">({fmtPct(rateBase)})</span>}
+                  {baseExceedsPhysical ? (
+                    <span className="ml-1 rounded-[2px] bg-negative-soft px-1.5 py-0 text-[10px] font-medium text-negative">
+                      超物理基线（无效节能率）
+                    </span>
+                  ) : (
+                    rateBase != null && <span className="ml-1 text-[11px] text-positive">({fmtPct(rateBase)})</span>
+                  )}
                 </span>
                 <span>
                   <span className="text-muted">基准节费：</span>
@@ -1469,6 +1482,21 @@ export function RetrofitWorkspace({
                 </span>
               </div>
             </section>
+
+            {/* Physical Baseline Validity Guard Banner (Forbids >100% Effective Savings Rate!) */}
+            {anyExceedsPhysical && annBase != null && (
+              <div
+                role="alert"
+                data-f19-baseline-guard
+                className="flex flex-wrap items-start gap-2.5 rounded-[4px] border border-negative/40 bg-negative-soft/60 px-4 py-2.5 text-[12px] text-negative tabular"
+              >
+                <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                <div>
+                  <strong>物理基线有效性边界拦截：</strong>
+                  当前存在情景预计年节能量超过改造前年化基线用能（{fmtNum(annBase)} {active.unit}/年），物理上不可成立。系统已禁止输出超过 100% 的无效节能率；请先核查 F18 基线周期代表性（如非采暖季基线折算偏低）或下调左侧测算参数。
+                </div>
+              </div>
+            )}
 
             {/* ── 2. Interactive Modeling Lab Layout: Left 4-Col Parameter Deck -> Right 8-Col Breakeven & Scenario Canvas ── */}
             <div className="grid items-start gap-4 lg:grid-cols-12">
@@ -1554,9 +1582,15 @@ export function RetrofitWorkspace({
                     <div className="font-medium text-fg-2">基准情景推导链路（模拟）</div>
                     <div>
                       改造后预计用能 ={' '}
-                      <strong className="text-fg">
-                        {postBaseUsage != null ? `${fmtNum(postBaseUsage)} ${active.unit}/年` : '缺少基线'}
-                      </strong>
+                      {baseExceedsPhysical && annBase != null ? (
+                        <strong className="text-negative">
+                          超物理基线 +{fmtNum(pBase - annBase)} {active.unit}（参数需复核）
+                        </strong>
+                      ) : (
+                        <strong className="text-fg">
+                          {postBaseUsage != null ? `${fmtNum(postBaseUsage)} ${active.unit}/年` : '缺少基线'}
+                        </strong>
+                      )}
                     </div>
                     <div>
                       预计年节费 = {fmtNum(pBase)} × {pPriceConfigured ? `¥${pPrice}` : '缺单价'} ={' '}
@@ -1642,6 +1676,7 @@ export function RetrofitWorkspace({
                       paybackLow={pbLow}
                       paybackBase={pbBase}
                       paybackHigh={pbHigh}
+                      annualizedBaseline={annBase}
                       unit={active.unit}
                     />
                   </div>
@@ -1669,24 +1704,43 @@ export function RetrofitWorkspace({
                         { label: '保守情景 (Low)', sav: pLow, rate: rateLow, cost: costLow, pb: pbLow, accent: false },
                         { label: '基准情景 (Base · 推荐)', sav: pBase, rate: rateBase, cost: costBase, pb: pbBase, accent: true },
                         { label: '乐观情景 (High)', sav: pHigh, rate: rateHigh, cost: costHigh, pb: pbHigh, accent: false },
-                      ].map((sc) => (
-                        <tr key={sc.label} className={sc.accent ? 'bg-primary-soft/25' : ''}>
-                          <td className="px-4 py-2 font-medium text-fg">{sc.label}</td>
-                          <td className="px-4 py-2 text-right font-semibold text-fg">{fmtNum(sc.sav)}</td>
-                          <td className="px-4 py-2 text-right text-fg-2">
-                            {annBase != null ? fmtNum(Math.max(0, annBase - sc.sav)) : <span className="text-warning">缺少基线</span>}
-                          </td>
-                          <td className="px-4 py-2 text-right text-fg-2">
-                            {sc.rate != null ? fmtPct(sc.rate) : <span className="text-warning">缺少基线</span>}
-                          </td>
-                          <td className="px-4 py-2 text-right font-medium text-fg">
-                            {pPriceConfigured && sc.cost != null ? `¥${fmtNum(Math.round(sc.cost))}` : <span className="text-warning">缺单价</span>}
-                          </td>
-                          <td className="px-4 py-2 text-right font-semibold text-primary">
-                            {sc.pb != null ? `${sc.pb.toFixed(2)} 年` : <span className="font-normal text-warning">不可计算</span>}
-                          </td>
-                        </tr>
-                      ))}
+                      ].map((sc) => {
+                        const overBase = exceedsBase(sc.sav);
+                        return (
+                          <tr key={sc.label} className={sc.accent ? 'bg-primary-soft/25' : ''}>
+                            <td className="px-4 py-2 font-medium text-fg">{sc.label}</td>
+                            <td className={`px-4 py-2 text-right font-semibold ${overBase ? 'text-negative' : 'text-fg'}`}>
+                              {fmtNum(sc.sav)}
+                            </td>
+                            <td className="px-4 py-2 text-right text-fg-2">
+                              {annBase == null ? (
+                                <span className="text-warning">缺少基线</span>
+                              ) : overBase ? (
+                                <span className="font-medium text-negative">超基线 +{fmtNum(sc.sav - annBase)}</span>
+                              ) : (
+                                fmtNum(annBase - sc.sav)
+                              )}
+                            </td>
+                            <td className="px-4 py-2 text-right text-fg-2">
+                              {overBase ? (
+                                <span className="rounded-[2px] bg-negative-soft px-1.5 py-0 text-[10px] font-medium text-negative">
+                                  超基线无效
+                                </span>
+                              ) : sc.rate != null ? (
+                                fmtPct(sc.rate)
+                              ) : (
+                                <span className="text-warning">缺少基线</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-2 text-right font-medium text-fg">
+                              {pPriceConfigured && sc.cost != null ? `¥${fmtNum(Math.round(sc.cost))}` : <span className="text-warning">缺单价</span>}
+                            </td>
+                            <td className="px-4 py-2 text-right font-semibold text-primary">
+                              {sc.pb != null ? `${sc.pb.toFixed(2)} 年` : <span className="font-normal text-warning">不可计算</span>}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </section>

@@ -6,6 +6,7 @@ import { EnergyManagementDrawer } from '../components/EnergyManagementDrawer';
 import { EnergyReportStudio } from '../components/EnergyReportStudio';
 import { RetrofitWorkspace, type RetrofitData } from '../components/RetrofitWorkspace';
 import {
+  AnomalyDistributionBarChart,
   AssessmentScoreChart,
   BenchmarkBulletChart,
   CHART_PALETTE,
@@ -15,6 +16,7 @@ import {
   DiscreteSampleCompareChart,
   EnergyFlowBalanceChart,
   EnergyStructureChart,
+  GroupedComparisonBarChart,
   HorizontalRankingChart,
   PeriodVarianceBarChart,
   ScoreDistributionChart,
@@ -519,11 +521,8 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
   const [token, setToken] = useState<string>(() => sessionStorage.getItem(LIVE_TOKEN_KEY) ?? '');
   const [tokenDraft, setTokenDraft] = useState<string>(token);
   const [devAuthTried, setDevAuthTried] = useState<boolean>(() => Boolean(sessionStorage.getItem(LIVE_TOKEN_KEY)));
-  const [isLanGateway, setIsLanGateway] = useState<boolean>(false);
-  const [lanAuthed, setLanAuthed] = useState<boolean>(false);
-  const [lanPasscode, setLanPasscode] = useState<string>('');
-  const [lanBusy, setLanBusy] = useState<boolean>(false);
-  const [lanErr, setLanErr] = useState<string | null>(null);
+  const [isLanReadOnly, setIsLanReadOnly] = useState<boolean>(false);
+  const [lanAllowedSubnet, setLanAllowedSubnet] = useState<string>('');
   const [inventory, setInventory] = useState<InventoryData | null>(null);
   const [payload, setPayload] = useState<{ section: LiveSection; data: unknown } | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
@@ -588,41 +587,6 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
     setRefreshTick((n) => n + 1);
   };
 
-  const submitLanPasscode = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLanBusy(true);
-    setLanErr(null);
-    try {
-      const res = await fetch('/lan-auth/login', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ passcode: lanPasscode.trim() }),
-      });
-      const body = (await res.json().catch(() => null)) as { authenticated?: boolean; message?: string } | null;
-      if (!res.ok || !body?.authenticated) {
-        setLanErr(body?.message ?? '局域网口令验证失败');
-        return;
-      }
-      setLanPasscode('');
-      setLanAuthed(true);
-      setAuthError(null);
-      setRefreshTick((n) => n + 1);
-    } catch {
-      setLanErr('无法连接局域网认证入口，请检查网络状态');
-    } finally {
-      setLanBusy(false);
-    }
-  };
-
-  const logoutLanSession = async () => {
-    await fetch('/lan-auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => null);
-    setLanAuthed(false);
-    setInventory(null);
-    setPayload(null);
-    setAuthError('局域网演示会话已退出，请重新输入演示口令登录');
-  };
-
   const buildEndpoint = useCallback(() => {
     const qs = new URLSearchParams();
     if (building) qs.set('building', building);
@@ -670,15 +634,19 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
     const host = window.location.hostname;
     const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
 
-    // Non-loopback host (LAN gateway): NEVER invoke loopback dev-auth auto-login!
+    // Non-loopback host (trusted LAN gateway): NEVER invoke loopback dev-auth; enter read-only preview directly!
     if (!isLoopback) {
       fetch('/lan-auth/status', { credentials: 'same-origin' })
-        .then(async (r) => (r.ok ? ((await r.json()) as { lanGateway?: boolean; authenticated?: boolean }) : null))
+        .then(async (r) =>
+          r.ok
+            ? ((await r.json()) as { lanGateway?: boolean; readOnly?: boolean; allowedSubnet?: string })
+            : null,
+        )
         .then((body) => {
           if (cancelled) return;
           if (body?.lanGateway) {
-            setIsLanGateway(true);
-            setLanAuthed(Boolean(body.authenticated));
+            setIsLanReadOnly(Boolean(body.readOnly ?? true));
+            setLanAllowedSubnet(body.allowedSubnet ?? '192.168.100.0/24');
           }
           setDevAuthTried(true);
         })
@@ -915,15 +883,26 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
               <span className="hidden h-4 w-px bg-line sm:inline-block" aria-hidden="true" />
             </>
           )}
-          <button
-            type="button"
-            onClick={() => setDrawerOpen(true)}
-            className="arco-btn"
-          >
-            <Settings2 className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
-            <span>配置中心</span>
-            <span className="hidden text-muted tabular sm:inline">({inventory?.configuredMeterCount ?? 0})</span>
-          </button>
+          {isLanReadOnly && (
+            <span
+              data-lan-readonly-badge
+              title={`仅限可信局域网网段 ${lanAllowedSubnet || '192.168.100.0/24'} 免口令只读预览；配置与写入操作受限`}
+              className="inline-flex h-[24px] items-center rounded-[2px] border border-primary/25 bg-primary-soft/60 px-2 text-[11px] font-medium text-primary"
+            >
+              局域网只读预览
+            </span>
+          )}
+          {!isLanReadOnly && (
+            <button
+              type="button"
+              onClick={() => setDrawerOpen(true)}
+              className="arco-btn"
+            >
+              <Settings2 className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
+              <span>配置中心</span>
+              <span className="hidden text-muted tabular sm:inline">({inventory?.configuredMeterCount ?? 0})</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setRefreshTick((n) => n + 1)}
@@ -933,80 +912,35 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin text-primary' : 'text-fg-2'}`} aria-hidden="true" />
             <span className="hidden sm:inline">刷新</span>
           </button>
-          {isLanGateway && lanAuthed && (
-            <button
-              type="button"
-              data-lan-logout
-              onClick={logoutLanSession}
-              className="arco-btn text-fg-2"
-            >
-              <span>退出局域网会话</span>
-            </button>
-          )}
         </div>
       </div>
 
       {/* Mobile Compact Filter Drawer */}
       {showFilterBar && <MobileFilterDrawer summary={filterSummaryText}>{filterControls}</MobileFilterDrawer>}
 
-      {/* Fail-closed Auth Gate (LAN Passcode Session Gate or Bearer Token Gate) */}
+      {/* Fail-closed Auth Gate (Production / Non-LAN Token Gate only; LAN enters directly in read-only mode) */}
       {authError && (
         <section className="rounded-[4px] border border-warning/40 bg-surface p-5">
           <div className="flex items-start gap-3">
             <KeyRound className="mt-0.5 h-5 w-5 shrink-0 text-warning" aria-hidden="true" />
             <div className="min-w-0 flex-1 space-y-3">
-              {isLanGateway ? (
-                <>
-                  <div>
-                    <h2 className="text-sm font-semibold text-fg">局域网演示访问认证（默认拒绝模式）</h2>
-                    <p className="mt-1 text-xs text-muted">{authError}</p>
-                    <p className="mt-1 text-[11px] text-warning">
-                      安全边界：当前 HTTP 入口仅用于可信局域网临时模拟数据演示；严禁直接依赖本地开发自动登录。传输真实生产数据或长期多用户访问须采用 HTTPS 与企业正式身份认证。
-                    </p>
-                  </div>
-                  <form onSubmit={submitLanPasscode} className="flex flex-wrap items-center gap-2">
-                    <input
-                      type="password"
-                      data-lan-passcode-input
-                      value={lanPasscode}
-                      onChange={(e) => setLanPasscode(e.target.value)}
-                      placeholder="输入主机启动脚本生成的局域网演示口令"
-                      aria-label="局域网演示口令"
-                      required
-                      className="min-w-[260px] flex-1 rounded-[4px] border border-line bg-surface-2 px-3 py-1.5 text-xs text-fg"
-                    />
-                    <button
-                      type="submit"
-                      data-lan-login-submit
-                      disabled={lanBusy}
-                      className="rounded-[4px] bg-primary px-4 py-1.5 text-xs font-medium text-white disabled:opacity-50"
-                    >
-                      {lanBusy ? '验证中…' : '验证口令并进入工作台'}
-                    </button>
-                  </form>
-                  {lanErr && <p role="alert" className="text-xs text-negative">{lanErr}</p>}
-                </>
-              ) : (
-                <>
-                  <div>
-                    <h2 className="text-sm font-semibold text-fg">需要可信身份凭据（默认拒绝模式）</h2>
-                    <p className="mt-1 text-xs text-muted">{authError}</p>
-                  </div>
-                  <form onSubmit={applyToken} className="flex flex-wrap items-center gap-2">
-                    <input
-                      type="password"
-                      value={tokenDraft}
-                      onChange={(e) => setTokenDraft(e.target.value)}
-                      placeholder="粘贴经服务端签名的 Bearer Token（仅存于当前会话）"
-                      aria-label="Bearer Token"
-                      className="min-w-[260px] flex-1 rounded-[4px] border border-line bg-surface-2 px-3 py-1.5 text-xs text-fg"
-                    />
-                    <button type="submit" className="rounded-[4px] bg-primary px-4 py-1.5 text-xs font-medium text-white">
-                      应用凭据并加载
-                    </button>
-                  </form>
-                </>
-              )}
+              <div>
+                <h2 className="text-sm font-semibold text-fg">需要可信身份凭据（默认拒绝模式）</h2>
+                <p className="mt-1 text-xs text-muted">{authError}</p>
+              </div>
+              <form onSubmit={applyToken} className="flex flex-wrap items-center gap-2">
+                <input
+                  type="password"
+                  value={tokenDraft}
+                  onChange={(e) => setTokenDraft(e.target.value)}
+                  placeholder="粘贴经服务端签名的 Bearer Token（仅存于当前会话）"
+                  aria-label="Bearer Token"
+                  className="min-w-[260px] flex-1 rounded-[4px] border border-line bg-surface-2 px-3 py-1.5 text-xs text-fg"
+                />
+                <button type="submit" className="rounded-[4px] bg-primary px-4 py-1.5 text-xs font-medium text-white">
+                  应用凭据并加载
+                </button>
+              </form>
             </div>
           </div>
         </section>
@@ -1096,6 +1030,7 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
           {section === 'dimensions' && (
             <LiveDimensionsView
               data={activePayload as DimensionsData}
+              token={token}
               onChangeView={(nextView) => updateParam('view', nextView)}
               onDrillBuilding={(bid) =>
                 navigate(`/a/energy/overview?building=${encodeURIComponent(bid)}${date ? `&date=${encodeURIComponent(date)}` : ''}`)
@@ -4532,15 +4467,38 @@ function LiveClassificationView({
 
 function LiveDimensionsView({
   data,
+  token,
   onChangeView,
   onDrillBuilding,
 }: {
   data: DimensionsData;
+  token: string;
   onChangeView: (view: string) => void;
   onDrillBuilding: (buildingId: string) => void;
 }) {
   const rows = data.rows ?? [];
   const [selectedId, setSelectedId] = useState<string | null>(() => rows[0]?.id ?? null);
+  const [prevDimData, setPrevDimData] = useState<DimensionsData | null>(null);
+  const anchorDate = fmtShanghaiDate(data.from);
+  const prevDate = anchorDate && anchorDate !== '—' ? shiftShanghaiDate(anchorDate, -1) : '';
+
+  // Fetch previous natural day's exact same dimension + energy for true side-by-side grouped bar comparison.
+  useEffect(() => {
+    if (data.configurationState === 'unconfigured' || !prevDate) {
+      setPrevDimData(null);
+      return;
+    }
+    const ctrl = new AbortController();
+    const qs = new URLSearchParams({ view: data.view, energy: data.energy, date: prevDate });
+    liveGet<DimensionsData>(`/dimensions?${qs}`, token, ctrl.signal)
+      .then((res) => {
+        if (!ctrl.signal.aborted) setPrevDimData(res.data ?? null);
+      })
+      .catch(() => {
+        if (!ctrl.signal.aborted) setPrevDimData(null);
+      });
+    return () => ctrl.abort();
+  }, [data.configurationState, data.view, data.energy, prevDate, token]);
 
   useEffect(() => {
     if (rows.length === 0) {
@@ -4558,6 +4516,10 @@ function LiveDimensionsView({
   }
 
   const canDrill = data.view === 'building';
+  const prevRowMap = useMemo(
+    () => new Map((prevDimData?.rows ?? []).map((r) => [r.id, r])),
+    [prevDimData?.rows],
+  );
   const rankedRows = useMemo(
     () => rows.filter((r) => r.rank != null && r.usage != null).sort((a, b) => (a.rank ?? 999) - (b.rank ?? 999)),
     [rows],
@@ -4582,12 +4544,26 @@ function LiveDimensionsView({
       : null;
   const viewLabel = data.view === 'building' ? '建筑' : data.view === 'space' ? '区域空间' : '组织部门';
 
+  const groupedItems = useMemo(
+    () =>
+      rows.map((r) => ({
+        id: r.id,
+        label: r.name,
+        shortLabel: r.name.replace(/^[A-Z0-9]+\s*[·・]\s*/, ''),
+        current: r.usage,
+        baseline: prevRowMap.get(r.id)?.usage ?? null,
+        comparable: r.rank != null,
+        reason: r.reason || (statusLabels[r.status] ?? r.status),
+      })),
+    [rows, prevRowMap],
+  );
+
   return (
     <div className="space-y-4">
-      {/* ── 1. Unified Dimension Switcher + Executive Dispersion Highlights ── */}
-      <section aria-label="多维统计口径与极值差异摘要" className="arco-card overflow-hidden">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-fill-1/60 px-4 py-2">
-          <div className="flex flex-wrap items-center gap-1" role="tablist" aria-label="切换统计维度">
+      {/* ── 1. Compact Dimension Switcher & Dispersion Command Bar (Zero 4-Box KPI Repetition) ── */}
+      <section aria-label="多维统计口径与极值差异摘要" className="arco-card flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-[12px] tabular">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="inline-flex items-center gap-1 rounded-[2px] border border-line bg-fill-1 p-0.5" role="tablist" aria-label="切换统计维度">
             {[
               { id: 'building', label: '建筑对比' },
               { id: 'space', label: '区域空间' },
@@ -4610,116 +4586,88 @@ function LiveDimensionsView({
               );
             })}
           </div>
-          <span className="text-[11px] text-muted tabular">
-            {fmtShanghaiDate(data.from)} · {energyLabels[data.energy] ?? data.energy} ({data.unit}) · {data.timezone}
+          <span className="text-muted">
+            {anchorDate} vs {prevDate} · {energyLabels[data.energy] ?? data.energy} ({data.unit})
           </span>
         </div>
 
-        <div className="grid divide-y divide-line sm:grid-cols-2 lg:grid-cols-4 lg:divide-y-0 lg:divide-x tabular">
-          <div className="p-4">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">最高耗能{viewLabel}</span>
-              <span className="rounded-[2px] bg-primary-soft px-1.5 py-0 text-[11px] leading-[18px] text-primary">
-                #1
-              </span>
-            </div>
-            <p className="mt-2 truncate text-[16px] font-semibold text-fg" title={highest?.name}>
-              {highest?.name ?? '—'}
-            </p>
-            <p className="mt-1 text-[12px] text-muted">
-              {highest ? (
-                <>
-                  <strong className="font-semibold text-fg">{fmtNum(highest.usage)}</strong> {data.unit}
-                  {comparableTotal > 0 && highest.usage != null && ` · 占可比总量 ${fmtPct(highest.usage / comparableTotal)}`}
-                </>
-              ) : (
-                '暂无可比对象'
-              )}
-            </p>
-          </div>
-
-          <div className="p-4">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">最低耗能{viewLabel}</span>
-              <span className="text-[11px] text-positive">同口径最低</span>
-            </div>
-            <p className="mt-2 truncate text-[16px] font-semibold text-fg" title={lowest?.name}>
-              {lowest?.name ?? '—'}
-            </p>
-            <p className="mt-1 text-[12px] text-muted">
-              {lowest ? (
-                <>
-                  <strong className="font-semibold text-fg">{fmtNum(lowest.usage)}</strong> {data.unit}
-                  {comparableAvg != null && lowest.usage != null && comparableAvg > 0 && ` · 较均值 ${fmtPct((lowest.usage - comparableAvg) / comparableAvg)}`}
-                </>
-              ) : (
-                '暂无可比对象'
-              )}
-            </p>
-          </div>
-
-          <div className="p-4">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">同口径极差与倍率</span>
-              {spreadRatio != null && (
-                <span className="rounded-[2px] bg-warning-soft px-1.5 py-0 text-[11px] font-medium leading-[18px] text-warning">
-                  {spreadRatio.toFixed(2)}×
-                </span>
-              )}
-            </div>
-            <p className="mt-2 text-[22px] font-semibold leading-[28px] text-fg">
-              {fmtNum(spreadAbs)}
-              <span className="ml-1 text-[12px] font-normal text-muted">{data.unit}</span>
-            </p>
-            <p className="mt-1 text-[11px] text-muted">
-              同口径均值 {fmtNum(comparableAvg)} {data.unit}（最高 − 最低）
-            </p>
-          </div>
-
-          <div className="bg-fill-1/35 p-4">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">正式参与排名对象</span>
-              <span className={`text-[11px] ${unrankedRows.length > 0 ? 'font-medium text-warning' : 'text-positive'}`}>
-                {unrankedRows.length > 0 ? `${unrankedRows.length} 项未排名` : '全部可比'}
-              </span>
-            </div>
-            <p className="mt-2 text-[22px] font-semibold leading-[28px] text-fg">
-              {rankedRows.length}
-              <span className="ml-1 text-[14px] font-normal text-muted">/ {rows.length}</span>
-            </p>
-            <p className="mt-1 text-[11px] text-muted">低覆盖或不可比对象保留量值，不强行排名</p>
-          </div>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px]">
+          {highest && (
+            <span>
+              <span className="text-muted">#1 最高：</span>
+              <strong className="font-semibold text-fg">{highest.name}</strong> ({fmtNum(highest.usage)} {data.unit})
+            </span>
+          )}
+          {spreadRatio != null && (
+            <span>
+              <span className="text-muted">极差：</span>
+              <strong className="font-semibold text-warning">{spreadRatio.toFixed(2)}×</strong> ({fmtNum(spreadAbs)} {data.unit})
+            </span>
+          )}
+          <span>
+            <span className="text-muted">可比参与：</span>
+            <strong className="font-semibold text-fg">{rankedRows.length}/{rows.length}</strong>
+            {unrankedRows.length > 0 && <span className="ml-1 text-[11px] text-warning">({unrankedRows.length} 项未排名)</span>}
+          </span>
         </div>
       </section>
 
-      {/* ── 2. Primary Stage: Horizontal Ranking (8 cols) + Linked Object & Metering Inspector (4 cols) ── */}
+      {/* ── 2. Primary Comparison Stage: Grouped Side-by-Side Column Chart + Horizontal Ranking Chart (8 cols) + Linked Meter Inspector (4 cols) ── */}
       <div className="grid items-start gap-4 lg:grid-cols-12">
-        <section className="arco-card p-5 lg:col-span-8">
-          <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-            <div>
-              <h2 className="text-[15px] font-medium leading-[22px] text-fg">
-                {viewLabel}同口径横向排名与均值偏差（{energyLabels[data.energy] ?? data.energy}）
-              </h2>
-              <p className="mt-0.5 text-[12px] text-muted">
-                点击任意对象联动右侧明细与计量来源；右侧百分比表示相对同口径均值的偏离幅度
-              </p>
+        <div className="space-y-4 lg:col-span-8">
+          {/* A. Side-by-Side Grouped Comparison Column Chart (Same Energy, Same Window, Same Unit) */}
+          <section className="arco-card p-5">
+            <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+              <div>
+                <h2 className="text-[15px] font-medium leading-[22px] text-fg">
+                  {viewLabel}分组对比柱状图（本期 {anchorDate} vs 前一日 {prevDate}）
+                </h2>
+                <p className="mt-0.5 text-[12px] text-muted">
+                  同一能源（{energyLabels[data.energy] ?? data.energy}）、同一单位（{data.unit}）下各对象同期并列对比，点击柱组联动右侧计量溯源
+                </p>
+              </div>
+              <span className="text-[11px] text-muted tabular">均值参考 {fmtNum(comparableAvg)} {data.unit}</span>
             </div>
-          </div>
-          <HorizontalRankingChart
-            unit={data.unit}
-            averageValue={comparableAvg}
-            selectedId={selectedRow?.id ?? null}
-            onSelect={(id) => setSelectedId(id)}
-            items={rows.map((r) => ({
-              id: r.id,
-              name: r.name,
-              usage: r.usage,
-              rank: r.rank,
-              coverageRate: r.coverage.rate,
-              reason: r.reason || (statusLabels[r.status] ?? r.status),
-            }))}
-          />
-        </section>
+            <GroupedComparisonBarChart
+              items={groupedItems}
+              unit={data.unit}
+              currentLabel={`本期 (${anchorDate})`}
+              baselineLabel={`前一日 (${prevDate})`}
+              averageValue={comparableAvg}
+              selectedId={selectedRow?.id ?? null}
+              onSelect={(id) => setSelectedId(id)}
+              height={246}
+            />
+          </section>
+
+          {/* B. Horizontal Ranking Bar Chart with Mean Deviation */}
+          <section className="arco-card p-5">
+            <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+              <div>
+                <h2 className="text-[15px] font-medium leading-[22px] text-fg">
+                  {viewLabel}同口径横向排名柱状图与均值偏离（{energyLabels[data.energy] ?? data.energy}）
+                </h2>
+                <p className="mt-0.5 text-[12px] text-muted">
+                  低覆盖或不可比对象保留实测值并置空名次；右侧百分比标示相对同口径均值的偏离幅度
+                </p>
+              </div>
+            </div>
+            <HorizontalRankingChart
+              unit={data.unit}
+              averageValue={comparableAvg}
+              selectedId={selectedRow?.id ?? null}
+              onSelect={(id) => setSelectedId(id)}
+              items={rows.map((r) => ({
+                id: r.id,
+                name: r.name,
+                usage: r.usage,
+                rank: r.rank,
+                coverageRate: r.coverage.rate,
+                reason: r.reason || (statusLabels[r.status] ?? r.status),
+              }))}
+            />
+          </section>
+        </div>
 
         {/* Right 4 Cols: Linked Object Details + Metering Source Traceability */}
         <aside aria-label="选中对象详情与计量来源" className="arco-card flex flex-col justify-between p-5 lg:col-span-4">
@@ -5246,35 +5194,61 @@ function LiveTrendView({ data, token }: { data: TrendData; token: string }) {
         </div>
       </section>
 
-      {/* ── 2. Primary Dual-Line Trend Canvas + Signed Period Variance Bars (Unified Analytical Card) ── */}
+      {/* ── 2. Primary Comparison Stage: Side-by-Side Period Grouped Column Chart + Signed Delta Column Chart ── */}
       <section className="arco-card space-y-5 p-5">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <div>
-            <h2 className="text-[15px] font-medium leading-[22px] text-fg">{chartModel.title}</h2>
+            <h2 className="text-[15px] font-medium leading-[22px] text-fg">
+              {chartModel.title.replace('双线趋势对照', '并列柱状对比与正负差额分析')}
+            </h2>
             <p className="mt-0.5 text-[12px] text-muted tabular">
-              {auxLoading ? '正在加载可比上期双线对照数据…' : chartModel.subtitle}
+              {auxLoading ? '正在加载可比上期分组对比数据…' : `${chartModel.subtitle} · 主图采用本期/上期并列柱状图与正负差额柱状图`}
             </p>
           </div>
-          <span className="text-[11px] text-muted">悬停查看精确时段、数值、对比差幅与数据覆盖率</span>
+          <span className="text-[11px] text-muted">悬停任意时段查看本期、上期、绝对差额与增减率</span>
         </div>
 
+        <GroupedComparisonBarChart
+          items={chartModel.variance.map((v, idx) => ({
+            id: `${v.label}-${idx}`,
+            label: v.label,
+            shortLabel: v.label,
+            current: v.current,
+            baseline: v.baseline,
+          }))}
+          unit={data.unit}
+          currentLabel={chartModel.seriesLabel}
+          baselineLabel={chartModel.comparisonLabel}
+          height={252}
+          wide
+        />
+
+        {chartModel.comparisonPoints.length > 0 && (
+          <div className="border-t border-line pt-4">
+            <h3 className="mb-2 text-[13px] font-medium text-fg">正负差额柱状图（本期 − 可比上期，红色上升 / 绿色下降）</h3>
+            <PeriodVarianceBarChart points={chartModel.variance} unit={data.unit} wide />
+          </div>
+        )}
+      </section>
+
+      {/* ── 3. Auxiliary Continuous Dual-Line Trend Curve ── */}
+      <section className="arco-card p-5">
+        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+          <div>
+            <h2 className="text-[14px] font-medium text-fg">辅助趋势折线对照（连续负荷形态观察）</h2>
+            <p className="mt-0.5 text-[12px] text-muted">辅助核查周期内峰值漂移与缺测断档（缺测时段绝不按 0 连线）</p>
+          </div>
+        </div>
         <TrendAreaChart
           points={chartModel.points}
           comparisonPoints={chartModel.comparisonPoints}
           seriesLabel={chartModel.seriesLabel}
           comparisonLabel={chartModel.comparisonLabel}
           unit={data.unit}
-          height={292}
+          height={224}
           wide
           xLabelFormatter={chartModel.xFormatter}
         />
-
-        {chartModel.comparisonPoints.length > 0 && (
-          <div className="border-t border-line pt-4">
-            <h3 className="mb-2 text-[13px] font-medium text-fg">分时段差幅分布（本期 − 可比上期）</h3>
-            <PeriodVarianceBarChart points={chartModel.variance} unit={data.unit} wide />
-          </div>
-        )}
       </section>
     </div>
   );
@@ -5812,6 +5786,56 @@ function LiveAnomalyView({
               height={304}
             />
           )}
+
+          {/* Anomaly Event Frequency Distribution Bar Chart + Timeline Summary */}
+          <div className="grid gap-4 border-t border-line pt-4 lg:grid-cols-12 tabular">
+            <div className="lg:col-span-7">
+              <h3 className="mb-2 text-[13px] font-medium text-fg">异常类型与终端频次分布柱状图</h3>
+              <AnomalyDistributionBarChart
+                items={[
+                  ...(isUsageCandidate
+                    ? [{ key: '__usage_hit__', label: '用能异常候选命中', count: 1, kind: 'usage_candidate' as const }]
+                    : []),
+                  ...exceptions.map((ex, i) => ({
+                    key: `${ex.terminalId}-${ex.errorType}-${i}`,
+                    label: `${ex.terminalId} (${ex.errorType})`,
+                    count: ex.count,
+                    kind: 'metering_quality' as const,
+                  })),
+                ]}
+              />
+            </div>
+
+            <div className="border-t border-line pt-3 lg:col-span-5 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-4">
+              <h3 className="mb-2 text-[13px] font-medium text-fg">异常诊断事件时间轴</h3>
+              <ol className="relative space-y-2.5 border-l border-line pl-3.5 text-[11px]">
+                {historySeries.map((pt, idx) => {
+                  const isObs = idx === historySeries.length - 1;
+                  const hit = isObs && (isUsageCandidate || isMeteringAnomaly);
+                  return (
+                    <li key={`${pt.from}-${idx}`} className="relative">
+                      <span
+                        className={`absolute -left-[19px] top-1 size-2 rounded-full ${
+                          hit ? 'bg-warning ring-2 ring-warning/30' : 'bg-primary/60'
+                        }`}
+                      />
+                      <div className="flex items-center justify-between gap-2">
+                        <span className={hit ? 'font-semibold text-warning' : 'font-medium text-fg'}>
+                          {fmtShanghaiDate(pt.from)} {isObs ? '（观测日）' : '（同星期样本）'}
+                        </span>
+                        <span className="font-semibold text-fg">
+                          {pt.usage != null ? `${fmtNum(pt.usage)} ${data.unit}` : '缺测'}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-muted">
+                        有效 {pt.valid}/{pt.expected} 槽{hit ? ` · 命中 ${data.activeRuleRevision || '异常规则'}` : ''}
+                      </p>
+                    </li>
+                  );
+                })}
+              </ol>
+            </div>
+          </div>
 
           {/* Docked Root-Cause Metering Point Verification Checklist */}
           <div className="border-t border-line pt-4 tabular">
