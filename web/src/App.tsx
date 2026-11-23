@@ -82,10 +82,16 @@ function ListRoute({ kind, param }: { kind: ListKind; param: 'name' | 'slot' }) 
 
 export default function App() {
   const { meta, loading, error, reload } = useMetaState();
+  const { pathname } = useLocation();
+  const isEnergyLiveRoute =
+    Boolean(BuildingEnergyLivePage) &&
+    (pathname === '/' || pathname === '' || pathname.startsWith(ENERGY_WORKSPACE_PATH));
 
-  if (!meta) return <MetaGate loading={loading} error={error} onRetry={reload} />;
+  if (!meta && !isEnergyLiveRoute) return <MetaGate loading={loading} error={error} onRetry={reload} />;
 
-  const home = firstPath(meta, (ENERGY_PREVIEW || ENERGY_LIVE) ? 'building-energy' : 'technical');
+  const home = meta
+    ? firstPath(meta, (ENERGY_PREVIEW || ENERGY_LIVE) ? 'building-energy' : 'technical')
+    : ENERGY_OVERVIEW_PATH;
 
   return (
     <Routes>

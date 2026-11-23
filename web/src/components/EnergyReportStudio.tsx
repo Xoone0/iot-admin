@@ -748,38 +748,20 @@ export function EnergyReportStudio({
           </div>
         )}
 
-        {/* F22: Metrics & Quota Report Summary + Compact Inline Benchmarking Visual */}
+        {/* F22: Metrics & Quota Report Audit Strip + Compact Inline Benchmarking Visual */}
         {section === 'report-metrics' && f22Summary && (
-          <div className="space-y-4 p-5 tabular">
-            <div className="grid divide-y divide-line rounded-[4px] border border-line sm:grid-cols-2 lg:grid-cols-4 lg:divide-y-0 lg:divide-x">
-              <div className="p-3.5">
-                <p className="text-[12px] text-fg-2">已计算指标 / 缺失分母</p>
-                <p className="mt-1 text-[22px] font-semibold text-fg">
-                  {f22Summary.ready}
-                  <span className="mx-1 text-[13px] font-normal text-muted">/</span>
-                  <span className={f22Summary.missingDenom > 0 ? 'text-warning' : 'text-fg-2'}>{f22Summary.missingDenom}</span>
-                </p>
-                <p className="mt-0.5 text-[11px] text-muted">缺分母项保留空值，绝不伪造指标</p>
+          <div className="space-y-3.5 p-5 tabular">
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-[4px] border border-line bg-fill-1/40 px-4 py-2 text-[12px]">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                <span>已计算指标 <strong className="text-fg">{f22Summary.ready}</strong></span>
+                <span>缺分母不可算 <strong className={f22Summary.missingDenom > 0 ? 'text-warning' : 'text-fg-2'}>{f22Summary.missingDenom}</strong></span>
+                <span>低于上限 <strong className="text-positive">{f22Summary.within}</strong></span>
+                <span>超出上限 <strong className={f22Summary.exceeds > 0 ? 'text-negative' : 'text-fg'}>{f22Summary.exceeds}</strong></span>
+                <span>无标准/不可对标 <strong className="text-fg-2">{f22Summary.uncomparable}</strong></span>
               </div>
-              <div className="p-3.5">
-                <p className="text-[12px] text-fg-2">低于阈值上限</p>
-                <p className="mt-1 text-[22px] font-semibold text-positive">{f22Summary.within}</p>
-                <p className="mt-0.5 text-[11px] text-muted">满足当前已匹配标准上限</p>
-              </div>
-              <div className="p-3.5">
-                <p className="text-[12px] text-fg-2">超出阈值上限</p>
-                <p className={`mt-1 text-[22px] font-semibold ${f22Summary.exceeds > 0 ? 'text-negative' : 'text-fg'}`}>
-                  {f22Summary.exceeds}
-                </p>
-                <p className="mt-0.5 text-[11px] text-muted">需核查用能强度超限原因</p>
-              </div>
-              <div className="bg-fill-1/35 p-3.5">
-                <p className="text-[12px] text-fg-2">无标准 / 不可对标</p>
-                <p className="mt-1 text-[22px] font-semibold text-fg-2">{f22Summary.uncomparable}</p>
-                <p className="mt-0.5 text-[11px] text-muted">
-                  {f22Summary.hasDemo ? '含演示标准 · 不构成正式达标认证' : '严格按已发布规则对标'}
-                </p>
-              </div>
+              <span className="text-[11px] text-muted">
+                {f22Summary.hasDemo ? '含演示标准 · 不构成正式达标认证' : '严格按已发布规则对标，缺分母保留空值'}
+              </span>
             </div>
 
             {/* Compact Inline Benchmark Comparison Bars + Rule Version Provenance */}
@@ -970,39 +952,17 @@ export function EnergyReportStudio({
           </div>
         )}
 
-        {/* F24: Retrofit & M&V Print-Friendly Executive Report Cards */}
+        {/* F24: Retrofit & M&V Print-Friendly Executive Report Audit Strip + Comparison Cards */}
         {section === 'report-retrofit' && f24Summary && (
-          <div className="space-y-4 p-5 tabular">
-            <div className="grid divide-y divide-line rounded-[4px] border border-line sm:grid-cols-2 lg:grid-cols-4 lg:divide-y-0 lg:divide-x">
-              <div className="p-3.5">
-                <p className="text-[12px] text-fg-2">纳入报表改造项目</p>
-                <p className="mt-1 text-[22px] font-semibold text-fg">{rawRows.length} 项</p>
-                <p className="mt-0.5 text-[11px] text-muted">严格区分模型预计收益与已核验成果</p>
+          <div className="space-y-3.5 p-5 tabular">
+            {/* Compact Audit Summary Bar + Status Filter (Formal Report Archetype — Zero Dashboard 4-KPI Box Bloat) */}
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-[4px] border border-line bg-fill-1/40 px-4 py-2 text-[12px]">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                <span>纳入项目 <strong className="text-fg">{rawRows.length} 项</strong></span>
+                <span>M&amp;V 已核验 <strong className="text-positive">{f24Summary.verified.length}</strong></span>
+                <span>待核验 / 仅估算 <strong className="text-warning">{f24Summary.pending.length} / {f24Summary.estimatedOnly.length}</strong></span>
+                <span>已核验参考减碳 <strong className="text-fg">{fmtNum(f24Summary.totalVerifiedCarbon)} kgCO₂e</strong> <span className="text-[11px] text-muted">(非履约凭证)</span></span>
               </div>
-              <div className="p-3.5">
-                <p className="text-[12px] text-fg-2">M&amp;V 模拟核验完成</p>
-                <p className="mt-1 text-[22px] font-semibold text-positive">{f24Summary.verified.length} 项</p>
-                <p className="mt-0.5 text-[11px] text-muted">均满足基线锁定与 ≥90% 覆盖门禁</p>
-              </div>
-              <div className="p-3.5">
-                <p className="text-[12px] text-fg-2">待核验 / 仅模型估算</p>
-                <p className="mt-1 text-[22px] font-semibold text-warning">
-                  {f24Summary.pending.length} / {f24Summary.estimatedOnly.length}
-                </p>
-                <p className="mt-0.5 text-[11px] text-muted">未达核验门禁不生成已核验节能量</p>
-              </div>
-              <div className="bg-fill-1/35 p-3.5">
-                <p className="text-[12px] text-fg-2">已核验参考减碳合计</p>
-                <p className="mt-1 text-[22px] font-semibold text-fg">
-                  {fmtNum(f24Summary.totalVerifiedCarbon)} <span className="text-[11px] font-normal text-muted">kgCO₂e</span>
-                </p>
-                <p className="mt-0.5 text-[11px] text-muted">仅统计已核验项目（非履约凭证）</p>
-              </div>
-            </div>
-
-            {/* Print-Friendly Per-Project Comparison Cards (Separating Estimated vs Verified Visually) */}
-            <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg">项目改造测算与 M&amp;V 核验对照卡</span>
               <div className="flex items-center gap-1.5 text-[11px]">
                 {[
                   { id: 'all', label: `全部 (${rawRows.length})` },

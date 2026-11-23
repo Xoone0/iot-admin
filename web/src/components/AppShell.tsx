@@ -25,7 +25,7 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import type { MetaPayload } from '../api/types';
 import { cn } from '../lib/cn';
-import { useMeta } from '../meta';
+import { useMetaState } from '../meta';
 import {
   BuildingEnergyMobileNavigation,
   BuildingEnergyNavigation,
@@ -139,14 +139,14 @@ export function applyStoredTheme() {
 }
 
 export function AppShell({ navigation = 'technical' }: { navigation?: Navigation }) {
-  const meta = useMeta();
+  const { meta } = useMetaState();
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const [navOpen, setNavOpen] = useState(false);
   const [theme, setTheme] = useState<Theme>(readTheme);
   const [siderCollapsed, setSiderCollapsed] = useState<boolean>(() => localStorage.getItem(SIDER_KEY) === '1');
   const energyView = (ENERGY_PREVIEW || ENERGY_LIVE) && navigation === 'building-energy';
-  const sections = useMemo(() => (energyView ? [] : navSections(meta)), [meta, energyView]);
+  const sections = useMemo(() => (energyView || !meta ? [] : navSections(meta)), [meta, energyView]);
 
   // 详情页（如 /e/thing-models/1）的父级导航项：顶栏据此渲染"返回"。
   const parent = sections.flatMap((s) => s.items).find((item) => pathname.startsWith(item.to + '/'));

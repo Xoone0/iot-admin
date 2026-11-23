@@ -341,6 +341,7 @@ export async function liveGet<T>(
 ): Promise<{ data?: T; status: number; error?: string }> {
   const res = await fetch(`${LIVE_API_PREFIX}${path}`, {
     signal,
+    credentials: 'same-origin',
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   let body: { code?: number; message?: string; data?: T } | null = null;
@@ -362,6 +363,7 @@ export async function livePost<T>(
 ): Promise<{ data?: T; status: number; error?: string }> {
   const res = await fetch(`${LIVE_API_PREFIX}${path}`, {
     method: 'POST',
+    credentials: 'same-origin',
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -383,6 +385,7 @@ export async function livePost<T>(
 export async function downloadLiveCsv(path: string, token: string, filename: string): Promise<string | null> {
   const sep = path.includes('?') ? '&' : '?';
   const res = await fetch(`${LIVE_API_PREFIX}${path}${sep}format=csv`, {
+    credentials: 'same-origin',
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   if (!res.ok) {

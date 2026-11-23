@@ -471,66 +471,119 @@ export function RetrofitWorkspace({
         </div>
       )}
 
-      {/* Compact Project Switcher Bar (replaces oversized table pushing analytics off-screen) */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2" role="tablist" aria-label="切换改造项目">
-          {projects.map((p) => {
-            const isSel = active?.retrofitId === p.retrofitId;
-            const dotColor =
-              p.mvStatus === 'verified_simulated'
-                ? 'bg-positive'
-                : p.mvStatus === 'pending_verification'
-                ? 'bg-warning'
-                : 'bg-muted';
-            return (
+      {/* Compact Project Switcher Bar + 3-Stage Retrofit Lifecycle Progress Strip */}
+      <div className="space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2" role="tablist" aria-label="切换改造项目">
+            {projects.map((p) => {
+              const isSel = active?.retrofitId === p.retrofitId;
+              const dotColor =
+                p.mvStatus === 'verified_simulated'
+                  ? 'bg-positive'
+                  : p.mvStatus === 'pending_verification'
+                  ? 'bg-warning'
+                  : 'bg-muted';
+              return (
+                <button
+                  key={p.retrofitId}
+                  type="button"
+                  role="tab"
+                  aria-selected={isSel}
+                  onClick={() => {
+                    setSelectedId(p.retrofitId);
+                    setFeedback(null);
+                  }}
+                  className={`inline-flex items-center gap-2 rounded-[4px] border px-3 py-1.5 text-xs transition-colors ${
+                    isSel
+                      ? 'border-primary bg-primary-soft font-semibold text-primary'
+                      : 'border-line bg-surface text-fg hover:bg-surface-2'
+                  }`}
+                >
+                  <span className={`h-2 w-2 rounded-full ${dotColor}`} aria-hidden="true" />
+                  <span className="max-w-[220px] truncate">{p.name}</span>
+                  <span className="hidden text-[11px] opacity-70 sm:inline">({p.retrofitId})</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {mode === 'retrofit-baseline' && (
               <button
-                key={p.retrofitId}
                 type="button"
-                role="tab"
-                aria-selected={isSel}
                 onClick={() => {
-                  setSelectedId(p.retrofitId);
+                  setCreating((v) => !v);
                   setFeedback(null);
                 }}
-                className={`inline-flex items-center gap-2 rounded-[4px] border px-3 py-1.5 text-xs transition-colors ${
-                  isSel
-                    ? 'border-primary bg-primary-soft font-semibold text-primary'
-                    : 'border-line bg-surface text-fg hover:bg-surface-2'
-                }`}
+                className="inline-flex items-center gap-1.5 rounded-[4px] bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover"
               >
-                <span className={`h-2 w-2 rounded-full ${dotColor}`} aria-hidden="true" />
-                <span className="max-w-[220px] truncate">{p.name}</span>
-                <span className="hidden text-[11px] opacity-70 sm:inline">({p.retrofitId})</span>
+                <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                {creating ? '收起新建' : '新建改造项目'}
               </button>
-            );
-          })}
+            )}
+            {mode === 'retrofit-verification' && (
+              <button
+                type="button"
+                onClick={() => setShowMvForm((v) => !v)}
+                className="inline-flex items-center gap-1.5 rounded-[4px] border border-line bg-surface px-3 py-1.5 text-xs font-medium text-fg hover:bg-surface-2"
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
+                {showMvForm ? '收起核验表单' : '调整周期并执行核验'}
+              </button>
+            )}
+          </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          {mode === 'retrofit-baseline' && (
-            <button
-              type="button"
-              onClick={() => {
-                setCreating((v) => !v);
-                setFeedback(null);
-              }}
-              className="inline-flex items-center gap-1.5 rounded-[4px] bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover"
-            >
-              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-              {creating ? '收起新建' : '新建改造项目'}
-            </button>
-          )}
-          {mode === 'retrofit-verification' && (
-            <button
-              type="button"
-              onClick={() => setShowMvForm((v) => !v)}
-              className="inline-flex items-center gap-1.5 rounded-[4px] border border-line bg-surface px-3 py-1.5 text-xs font-medium text-fg hover:bg-surface-2"
-            >
-              <SlidersHorizontal className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
-              {showMvForm ? '收起核验表单' : '调整周期并执行核验'}
-            </button>
-          )}
-        </div>
+        {/* 3-Stage Retrofit Engineering Lifecycle Indicator (Read-Only Progress Stepper) */}
+        {active && (
+          <div
+            aria-label="改造评估三阶段流程进度"
+            className="grid gap-2 rounded-[4px] border border-line bg-surface px-4 py-2 text-[11px] sm:grid-cols-3 tabular"
+          >
+            {[
+              {
+                step: '阶段 1 · F18',
+                title: '改造前基线与版本锁定',
+                current: mode === 'retrofit-baseline',
+                done: Boolean(active.baselineLocked),
+                meta: active.baselineLocked ? `已锁定 ${active.baselineVersion}` : `草稿 ${active.baselineVersion}（待锁定）`,
+              },
+              {
+                step: '阶段 2 · F19',
+                title: '三情景潜力与回收期测算',
+                current: mode === 'retrofit-potential',
+                done: active.estSavingsBase > 0 && active.priceConfigured && active.capexBudget > 0,
+                meta: active.staticPaybackYears != null ? `基准回收期 ${active.staticPaybackYears.toFixed(2)} 年（模拟）` : '参数待补齐',
+              },
+              {
+                step: '阶段 3 · F20',
+                title: 'M&V 报告期核验交付',
+                current: mode === 'retrofit-verification',
+                done: active.mvStatus === 'verified_simulated',
+                meta: mvStatusShort[active.mvStatus] ?? active.mvStatus,
+              },
+            ].map((st) => (
+              <div
+                key={st.step}
+                className={`flex items-center justify-between gap-2 rounded-[2px] px-2.5 py-1.5 ${
+                  st.current ? 'border border-primary/35 bg-primary-soft/45' : 'bg-fill-1/40'
+                }`}
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span
+                    className={`size-2 shrink-0 rounded-full ${
+                      st.done ? 'bg-positive' : st.current ? 'bg-primary' : 'bg-line-strong'
+                    }`}
+                  />
+                  <span className={`truncate font-medium ${st.current ? 'text-primary' : 'text-fg'}`}>
+                    {st.step} {st.title}
+                  </span>
+                </div>
+                <span className={`shrink-0 text-[10px] ${st.done ? 'text-positive' : 'text-muted'}`}>{st.meta}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* F18 Create Form */}
@@ -974,24 +1027,24 @@ export function RetrofitWorkspace({
 
         return (
           <div className="space-y-4">
-            {/* ── 1. Project Context, Verifiability Verdict & Baseline Hero Strip ── */}
-            <section className="arco-card overflow-hidden">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line bg-fill-1/50 px-5 py-3">
-                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                  <h2 className="truncate text-[15px] font-medium text-fg">{active.name}</h2>
+            {/* ── 1. Compact Baseline Governance, Readout & Lock Bar (Zero 4-Box KPI Repetition) ── */}
+            <section className="arco-card px-5 py-3.5 tabular">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex min-w-0 flex-wrap items-center gap-2.5 text-[12px]">
+                  <h2 className="truncate text-[15px] font-semibold text-fg">{active.name}</h2>
                   <span className="rounded-[2px] bg-fill-2 px-1.5 py-0 text-[11px] text-fg-2">
                     {active.buildingName}{active.spaceName ? ` · ${active.spaceName}` : '（整栋）'}
                   </span>
                   <span className="rounded-[2px] bg-primary-soft px-1.5 py-0 text-[11px] font-medium text-primary">
                     {energyLabels[active.energy] ?? active.energy} ({active.unit})
                   </span>
-                  <span className="font-mono text-[11px] text-muted">版本 {active.baselineVersion}</span>
+                  <span className="font-mono text-[11px] text-muted">当前 {active.baselineVersion}</span>
                   <span
                     className={`rounded-[2px] px-2 py-0.5 text-[11px] font-medium ${
                       readyForMV ? 'bg-positive-soft text-positive' : 'bg-warning-soft text-warning'
                     }`}
                   >
-                    {readyForMV ? '具备可核验条件' : '暂未完全满足核验门禁'}
+                    {readyForMV ? '具备可核验条件 (4/4)' : '门禁待补齐'}
                   </span>
                 </div>
 
@@ -1034,164 +1087,158 @@ export function RetrofitWorkspace({
                 </div>
               </div>
 
-              <div className="grid divide-y divide-line sm:grid-cols-2 sm:divide-y-0 lg:grid-cols-4 lg:divide-x tabular">
-                <div className="p-4 lg:p-5">
-                  <p className="text-[12px] font-medium text-fg-2">基线期数据库实算总量</p>
-                  <p className="mt-1.5 text-[24px] font-semibold leading-[30px] text-fg">
-                    {active.baselineActualUsage != null ? fmtNum(active.baselineActualUsage) : '无数据'}
-                    {active.baselineActualUsage != null && <span className="ml-1 text-[12px] font-normal text-muted">{active.unit}</span>}
-                  </p>
-                  <p className="mt-1 text-[11px] text-muted">
-                    年化参考 {active.annualizedBaselineUsage != null ? `${fmtNum(active.annualizedBaselineUsage)} ${active.unit}/年` : '—'}
-                    {bDays ? ` · 共 ${bDays} 天` : ''}
-                  </p>
-                </div>
-
-                <div className="p-4 lg:p-5">
-                  <div className="flex items-center justify-between gap-2 text-[12px]">
-                    <span className="font-medium text-fg-2">基线统计范围与覆盖率</span>
-                    <span
-                      className={`rounded-[2px] px-1.5 py-0 text-[10px] font-medium ${
-                        bCovOk ? 'bg-positive-soft text-positive' : 'bg-warning-soft text-warning'
-                      }`}
-                    >
-                      {bCovOk ? `达标 ≥${fmtPct(minCov)}` : '覆盖不足'}
-                    </span>
-                  </div>
-                  <p className="mt-1.5 text-[24px] font-semibold leading-[30px] text-fg">
+              <div className="mt-2.5 flex flex-wrap items-center gap-x-5 gap-y-1.5 border-t border-line pt-2.5 text-[12px]">
+                <span>
+                  <span className="text-muted">基线实算：</span>
+                  <strong className="text-[14px] font-semibold text-fg">
+                    {active.baselineActualUsage != null ? `${fmtNum(active.baselineActualUsage)} ${active.unit}` : '无数据'}
+                  </strong>
+                  {bDays ? <span className="ml-1 text-[11px] text-muted">({bDays} 天)</span> : null}
+                </span>
+                <span>
+                  <span className="text-muted">年化参考：</span>
+                  <strong className="font-medium text-fg">
+                    {active.annualizedBaselineUsage != null ? `${fmtNum(active.annualizedBaselineUsage)} ${active.unit}/年` : '—'}
+                  </strong>
+                </span>
+                <span>
+                  <span className="text-muted">日均：</span>
+                  <strong className="font-medium text-fg">{fmtNum(active.baselineDailyAvg)} {active.unit}</strong>
+                </span>
+                <span>
+                  <span className="text-muted">覆盖率：</span>
+                  <strong className={bCovOk ? 'font-semibold text-positive' : 'font-semibold text-warning'}>
                     {fmtPct(active.baselineActualCoverage?.rate)}
-                  </p>
-                  <p className="mt-1 text-[11px] text-muted">
-                    有效 {active.baselineActualCoverage?.valid ?? 0}/{active.baselineActualCoverage?.expected ?? 0} 槽 · 缺 {active.baselineActualCoverage?.missing ?? 0} · 疑 {active.baselineActualCoverage?.suspect ?? 0}
-                  </p>
-                </div>
-
-                <div className="p-4 lg:p-5">
-                  <div className="flex items-center justify-between gap-2 text-[12px]">
-                    <span className="font-medium text-fg-2">基线计算模型与拟合度</span>
-                    {active.baselineR2 != null && (
-                      <span
-                        className={`rounded-[2px] px-1.5 py-0 text-[10px] font-medium ${
-                          active.baselineR2 >= 0.75 ? 'bg-positive-soft text-positive' : 'bg-warning-soft text-warning'
-                        }`}
-                      >
-                        R² = {active.baselineR2.toFixed(3)}
-                      </span>
-                    )}
-                  </div>
-                  <p className="mt-1.5 truncate text-[14px] font-semibold leading-[30px] text-fg" title={active.baselineModel}>
-                    {active.baselineModel}
-                  </p>
-                  <p className="mt-1 text-[11px] text-muted">
-                    窗口 {bFromYmd} ~ {bToYmd} · 日均 {fmtNum(active.baselineDailyAvg)} {active.unit}
-                  </p>
-                </div>
-
-                <div className="bg-fill-1/35 p-4 lg:p-5">
-                  <p className="text-[12px] font-medium text-fg-2">调整条件与版本状态</p>
-                  <p className="mt-1.5 truncate text-[13px] font-medium leading-[30px] text-fg" title={active.baselineFactors}>
-                    {active.baselineFactors || '未填写修正因子'}
-                  </p>
-                  <p className="mt-1 text-[11px] text-muted">
-                    当前 {active.baselineVersion} · 历史归档 {history.length} 个版本
-                  </p>
-                </div>
+                  </strong>
+                  <span className="ml-1 text-[11px] text-muted">
+                    ({active.baselineActualCoverage?.valid ?? 0}/{active.baselineActualCoverage?.expected ?? 0})
+                  </span>
+                </span>
+                <span>
+                  <span className="text-muted">拟合度：</span>
+                  <strong className="font-medium text-fg">
+                    {active.baselineR2 != null ? `R² = ${active.baselineR2.toFixed(3)}` : '待建模'}
+                  </strong>
+                </span>
+                <span className="text-[11px] text-muted">
+                  窗口 {bFromYmd} ~ {bToYmd} · 归档 {history.length} 个版本
+                </span>
               </div>
             </section>
 
-            {/* ── 2. Primary Analytical Stage: Baseline Period Trend + Selection Rationale (8 cols) + Verifiability Gates & Version Diffs (4 cols) ── */}
+            {/* ── 2. Baseline Governance Stage: Left 7 Cols (Annual Trend + Version Diff Timeline) + Right 5 Cols (Readiness Checklist + Model Spec) ── */}
             <div className="grid items-start gap-4 lg:grid-cols-12">
-              <section className="arco-card space-y-4 p-5 lg:col-span-8">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <div className="space-y-4 lg:col-span-7">
+                <section className="arco-card space-y-3.5 p-5">
                   <div>
                     <h3 className="text-[15px] font-medium leading-[22px] text-fg">
-                      {baseTrendYear || '基线年度'}年{energyLabels[active.energy] ?? active.energy}月度趋势与所选基线区间
+                      {baseTrendYear || '基线年度'}年{energyLabels[active.energy] ?? active.energy}月度趋势与选定基线区间
                     </h3>
                     <p className="mt-0.5 text-[12px] text-muted tabular">
-                      琥珀色高亮区间为本改造项目选定的基线期（{bFromYmd} ~ {bToYmd}），直观呈现该区间负荷特征与代表性
+                      琥珀色区间标记当前项目选定的基线期（{bFromYmd} ~ {bToYmd}），核查季节波动与基线代表性
                     </p>
                   </div>
-                </div>
 
-                <TrendAreaChart
-                  points={baseTrendPoints}
-                  unit={active.unit}
-                  wide
-                  height={258}
-                  seriesLabel={`${baseTrendYear} 年月度实测 (${active.unit})`}
-                  referenceValue={monthlyAvgRef}
-                  referenceLabel={monthlyAvgRef != null ? `基线折算月均 ${fmtNum(monthlyAvgRef)}` : undefined}
-                  highlightIndices={baselineWindowIndices}
-                  highlightLabel="选定基线期"
-                  xLabelFormatter={(pt) => `${Number(pt.from.slice(5, 7))}月`}
-                />
+                  <TrendAreaChart
+                    points={baseTrendPoints}
+                    unit={active.unit}
+                    wide
+                    height={240}
+                    seriesLabel={`${baseTrendYear} 年月度实测 (${active.unit})`}
+                    referenceValue={monthlyAvgRef}
+                    referenceLabel={monthlyAvgRef != null ? `基线折算月均 ${fmtNum(monthlyAvgRef)}` : undefined}
+                    highlightIndices={baselineWindowIndices}
+                    highlightLabel="选定基线期"
+                    xLabelFormatter={(pt) => `${Number(pt.from.slice(5, 7))}月`}
+                  />
+                </section>
 
-                {/* Why This Baseline Was Chosen + Adjustment Basis */}
-                <div className="grid gap-3 border-t border-line pt-4 text-[12px] md:grid-cols-2">
-                  <div className="rounded-[4px] bg-fill-1/60 p-3.5">
-                    <h4 className="text-[12px] font-medium text-fg">改造边界与基线选择依据</h4>
-                    <p className="mt-1.5 text-[12px] leading-relaxed text-fg-2">
-                      {active.measureSummary || '暂无改造措施说明。'}
-                    </p>
-                    <p className="mt-2 text-[11px] text-muted tabular">
-                      范围：{active.buildingName}{active.spaceName ? ` / ${active.spaceName}` : '（整栋）'} · 区间 {bFromYmd} ~ {bToYmd}
-                    </p>
+                {/* Version Evolution & Effective Diff Timeline (Promoted to Primary Left Flow) */}
+                <section aria-label="历史基线版本演进与差异" className="arco-card p-5 text-[12px] tabular">
+                  <div className="mb-3 flex items-center justify-between border-b border-line pb-2">
+                    <div>
+                      <h3 className="text-[14px] font-medium text-fg">基线版本演进时间线与变更差异</h3>
+                      <p className="mt-0.5 text-[11px] text-muted">锁定版本不可覆写，任何基线参数变更均留存可审计版本快照</p>
+                    </div>
+                    <span className="rounded-[2px] bg-fill-2 px-2 py-0.5 text-[11px] font-medium text-fg-2">
+                      共 {history.length} 个版本
+                    </span>
                   </div>
-                  <div className="rounded-[4px] bg-fill-1/60 p-3.5">
-                    <h4 className="text-[12px] font-medium text-fg">基线计算模型与调整条件</h4>
-                    <dl className="mt-1.5 space-y-1 text-[11px] tabular">
-                      <div className="flex justify-between gap-2">
-                        <dt className="text-muted">模型方式</dt>
-                        <dd className="text-right font-medium text-fg">{active.baselineModel}</dd>
+                  <div className="space-y-2.5">
+                    {revDiffs.map(({ rev, diffs }, idx) => (
+                      <div
+                        key={rev.baselineVersion}
+                        className={`rounded-[4px] border border-l-[3px] p-3 text-[11px] ${
+                          idx === 0
+                            ? 'border-primary/35 border-l-primary bg-primary-soft/20'
+                            : 'border-line border-l-line-strong bg-surface'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-[12px] font-semibold text-fg">{rev.baselineVersion}</span>
+                            <span className={`rounded-[2px] px-1.5 py-0 text-[10px] font-medium ${rev.baselineLocked ? 'bg-positive-soft text-positive' : 'bg-warning-soft text-warning'}`}>
+                              {rev.baselineLocked ? '已锁定' : '草稿未锁定'}
+                            </span>
+                            <span className="text-muted">
+                              {fmtShanghaiDate(rev.baselineFrom)} ~ {fmtShanghaiDate(rev.baselineTo)}
+                            </span>
+                          </div>
+                          <span className="text-muted">
+                            实算 <strong className="text-fg">{rev.baselineActualUsage != null ? `${fmtNum(rev.baselineActualUsage)} ${active.unit}` : '—'}</strong> · 覆盖 {fmtPct(rev.baselineCoverage)}
+                          </span>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {diffs.map((d, di) => (
+                            <span key={di} className="rounded-[2px] bg-fill-2 px-1.5 py-0.5 text-[10px] text-fg-2">
+                              {d}
+                            </span>
+                          ))}
+                        </div>
+                        {rev.changeReason && (
+                          <p className="mt-1.5 text-[10px] text-muted">
+                            变更说明：{rev.changeReason} · 操作人 {rev.actorSub} · {rev.recordedAt.slice(0, 16).replace('T', ' ')}
+                          </p>
+                        )}
                       </div>
-                      <div className="flex justify-between gap-2">
-                        <dt className="text-muted">自变量 / 修正因子</dt>
-                        <dd className="text-right text-fg-2">{active.baselineFactors}</dd>
-                      </div>
-                      <div className="flex justify-between gap-2">
-                        <dt className="text-muted">回归拟合度 R²</dt>
-                        <dd className="text-right font-medium text-fg">
-                          {active.baselineR2 != null ? `${active.baselineR2.toFixed(3)}（参考门槛 ≥ 0.75）` : '待建模'}
-                        </dd>
-                      </div>
-                    </dl>
+                    ))}
                   </div>
-                </div>
-              </section>
+                </section>
+              </div>
 
-              {/* Right 4 Cols: Verifiability Readiness Gates + Version Evolution & Diffs */}
-              <aside aria-label="可核验门禁与历史版本差异" className="arco-card space-y-4 p-5 text-[12px] tabular lg:col-span-4">
-                <div>
-                  <div className="mb-2.5 flex items-center justify-between border-b border-line pb-2">
-                    <h3 className="text-[14px] font-medium text-fg">M&amp;V 可核验条件核查</h3>
-                    <span className={`text-[11px] font-medium ${readyForMV ? 'text-positive' : 'text-warning'}`}>
+              {/* Right 5 Cols: 4-Gate M&V Readiness Checklist + Model & Boundary Spec Card */}
+              <aside aria-label="可核验门禁与基线模型规范" className="space-y-4 lg:col-span-5 tabular">
+                <section className="arco-card p-5 text-[12px]">
+                  <div className="mb-3 flex items-center justify-between border-b border-line pb-2">
+                    <h3 className="text-[14px] font-medium text-fg">M&amp;V 可核验前置门禁核查</h3>
+                    <span className={`text-[11px] font-semibold ${readyForMV ? 'text-positive' : 'text-warning'}`}>
                       {[bDataOk, bCovOk, bModelOk, active.baselineLocked].filter(Boolean).length} / 4 通过
                     </span>
                   </div>
-                  <div className="space-y-1.5 text-[11px]">
+                  <div className="space-y-2 text-[11px]">
                     {[
                       {
                         ok: bDataOk,
-                        title: '基线期有效计量实算',
+                        title: '1. 基线期有效计量实算',
                         detail: bDataOk ? `${fmtNum(active.baselineActualUsage)} ${active.unit}` : '缺失基线期数据',
                       },
                       {
                         ok: bCovOk,
-                        title: `基线覆盖率 ≥ ${fmtPct(minCov)}`,
+                        title: `2. 基线采集覆盖率 ≥ ${fmtPct(minCov)}`,
                         detail: fmtPct(baseCovRate),
                       },
                       {
                         ok: bModelOk,
-                        title: '基线模型与调整因子',
+                        title: '3. 基线模型与修正因子完整',
                         detail: active.baselineR2 != null ? `R² ${active.baselineR2.toFixed(3)}` : '已配置因子',
                       },
                       {
                         ok: active.baselineLocked,
-                        title: '基线版本正式锁定',
-                        detail: active.baselineLocked ? `已锁定 (${active.baselineVersion})` : '未锁定（请先锁定）',
+                        title: '4. 基线版本正式锁定',
+                        detail: active.baselineLocked ? `已锁定 (${active.baselineVersion})` : '未锁定（请点击上方锁定）',
                       },
                     ].map((g) => (
-                      <div key={g.title} className="flex items-center justify-between gap-2 rounded-[2px] bg-fill-1/60 px-2.5 py-2">
+                      <div key={g.title} className="flex items-center justify-between gap-2 rounded-[4px] bg-fill-1/60 px-3 py-2.5">
                         <span className="flex items-center gap-2 font-medium text-fg">
                           <span className={`size-2 rounded-full ${g.ok ? 'bg-positive' : 'bg-warning'}`} />
                           {g.title}
@@ -1200,47 +1247,39 @@ export function RetrofitWorkspace({
                       </div>
                     ))}
                   </div>
-                </div>
+                </section>
 
-                {/* Version Evolution & Effective Diffs */}
-                <div className="border-t border-line pt-3.5">
-                  <div className="mb-2 flex items-center justify-between">
-                    <h3 className="text-[14px] font-medium text-fg">历史版本演进与有效差异</h3>
-                    <span className="text-[11px] text-muted">{history.length} 个版本</span>
+                <section className="arco-card space-y-3 p-5 text-[12px]">
+                  <h3 className="border-b border-line pb-2 text-[14px] font-medium text-fg">改造边界与基线计算规范</h3>
+                  <div className="rounded-[4px] bg-fill-1/60 p-3">
+                    <span className="text-[11px] font-medium text-fg-2">改造措施与对象边界</span>
+                    <p className="mt-1 text-[12px] leading-relaxed text-fg">
+                      {active.measureSummary || '暂无改造措施说明。'}
+                    </p>
                   </div>
-                  <div className="space-y-2">
-                    {revDiffs.map(({ rev, diffs }, idx) => (
-                      <div
-                        key={rev.baselineVersion}
-                        className={`rounded-[4px] border p-2.5 text-[11px] ${
-                          idx === 0 ? 'border-primary/35 bg-primary-soft/25' : 'border-line bg-surface'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-mono font-semibold text-fg">{rev.baselineVersion}</span>
-                          <span className={rev.baselineLocked ? 'text-positive' : 'text-warning'}>
-                            {rev.baselineLocked ? '已锁定' : '未锁定'}
-                          </span>
-                        </div>
-                        <p className="mt-1 text-muted">
-                          {fmtShanghaiDate(rev.baselineFrom)} ~ {fmtShanghaiDate(rev.baselineTo)} · 覆盖 {fmtPct(rev.baselineCoverage)}
-                        </p>
-                        <div className="mt-1.5 flex flex-wrap gap-1">
-                          {diffs.map((d, di) => (
-                            <span key={di} className="rounded-[2px] bg-fill-2 px-1.5 py-0 text-[10px] text-fg-2">
-                              {d}
-                            </span>
-                          ))}
-                        </div>
-                        {rev.changeReason && (
-                          <p className="mt-1 text-[10px] text-muted">
-                            原因：{rev.changeReason}（{rev.actorSub}）
-                          </p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                  <dl className="space-y-2 text-[11px]">
+                    <div className="flex justify-between gap-3">
+                      <dt className="shrink-0 text-muted">基线模型方式</dt>
+                      <dd className="text-right font-medium text-fg">{active.baselineModel}</dd>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <dt className="shrink-0 text-muted">自变量 / 修正因子</dt>
+                      <dd className="text-right text-fg-2">{active.baselineFactors || '未填写'}</dd>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <dt className="shrink-0 text-muted">回归拟合度 R²</dt>
+                      <dd className="text-right font-medium text-fg">
+                        {active.baselineR2 != null ? `${active.baselineR2.toFixed(3)}（参考门槛 ≥ 0.75）` : '待建模'}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <dt className="shrink-0 text-muted">缺测 / 可疑槽位</dt>
+                      <dd className="text-right text-fg-2">
+                        缺 {active.baselineActualCoverage?.missing ?? 0} · 疑 {active.baselineActualCoverage?.suspect ?? 0}
+                      </dd>
+                    </div>
+                  </dl>
+                </section>
               </aside>
             </div>
 
@@ -1386,142 +1425,60 @@ export function RetrofitWorkspace({
 
         return (
           <div className="space-y-4">
-            {/* ── 1. Simulated Economics Governance Banner + 4-Col Synchronized KPI Strip ── */}
-            <section className="arco-card overflow-hidden">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-fill-1/50 px-5 py-2.5 text-[12px] tabular">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="rounded-[2px] bg-warning-soft px-2 py-0.5 text-[11px] font-medium text-warning">
-                    模拟测算结果 · 非实际核验收益
-                  </span>
-                  <span className="font-medium text-fg">
-                    {active.name} · {active.buildingName} · {energyLabels[active.energy] ?? active.energy} ({active.unit})
-                  </span>
-                  {isDirty && (
-                    <span className="rounded-[2px] bg-primary-soft px-2 py-0.5 text-[11px] font-medium text-primary">
-                      参数实时预览中（点击下方保存持久化）
-                    </span>
-                  )}
-                </div>
-                <span className="text-[11px] text-muted">
-                  公式：年参考节费 = 预计年节能量 × 能源单价 · 静态回收期 = 改造投资 ÷ 年参考节费
+            {/* ── 1. Compact Simulation Governance & Key Output Ribbon (Zero 4-Box KPI Repetition) ── */}
+            <section className="arco-card flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-[12px] tabular">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <span className="rounded-[2px] bg-warning-soft px-2 py-0.5 text-[11px] font-medium text-warning">
+                  模拟测算模型 · 非实际核验收益
                 </span>
+                <span className="font-semibold text-fg">
+                  {active.name} · {active.buildingName} ({energyLabels[active.energy] ?? active.energy})
+                </span>
+                {isDirty && (
+                  <span className="rounded-[2px] bg-primary-soft px-2 py-0.5 text-[11px] font-medium text-primary">
+                    参数实时预览中（未保存）
+                  </span>
+                )}
               </div>
 
-              <div className="grid divide-y divide-line sm:grid-cols-2 sm:divide-y-0 lg:grid-cols-4 lg:divide-x tabular">
-                <div className="p-4 lg:p-5">
-                  <p className="text-[12px] font-medium text-fg-2">改造前年化基线用能</p>
-                  <p className="mt-1.5 text-[24px] font-semibold leading-[30px] text-fg">
-                    {annBase != null ? fmtNum(annBase) : <span className="text-[16px] text-warning">缺少有效基线</span>}
-                    {annBase != null && <span className="ml-1 text-[12px] font-normal text-muted">{active.unit}/年</span>}
-                  </p>
-                  <p className="mt-1 text-[11px] text-muted">
-                    基线版本 {active.baselineVersion} · {fmtShanghaiDate(active.baselineFrom)} ~ {fmtShanghaiDate(active.baselineTo)}
-                  </p>
-                </div>
-
-                <div className="p-4 lg:p-5">
-                  <div className="flex items-center justify-between gap-2 text-[12px]">
-                    <span className="font-medium text-fg-2">基准情景预计年节能量</span>
-                    {rateBase != null && (
-                      <span className="rounded-[2px] bg-positive-soft px-1.5 py-0 text-[10px] font-medium text-positive">
-                        节能率 {fmtPct(rateBase)}
-                      </span>
-                    )}
-                  </div>
-                  <p className="mt-1.5 text-[24px] font-semibold leading-[30px] text-primary">
-                    {fmtNum(pBase)}
-                    <span className="ml-1 text-[12px] font-normal text-muted">{active.unit}/年</span>
-                  </p>
-                  <p className="mt-1 text-[11px] text-muted">
-                    {postBaseUsage != null
-                      ? `改造后预计年用能 ${fmtNum(postBaseUsage)} ${active.unit}`
-                      : '缺少有效基线，不计算节能率'}
-                  </p>
-                </div>
-
-                <div className="p-4 lg:p-5">
-                  <p className="text-[12px] font-medium text-fg-2">基准年参考节费（模拟测算）</p>
-                  <p className="mt-1.5 text-[24px] font-semibold leading-[30px] text-fg">
-                    {costBase != null ? `¥${fmtNum(Math.round(costBase))}` : <span className="text-[16px] text-warning">不可计算</span>}
-                  </p>
-                  <p className="mt-1 text-[11px] text-muted">
-                    {pPriceConfigured ? `参考单价 ¥${pPrice}/${active.unit}` : '缺少能源单价（不以 0 代替）'}
-                    {' · '}投资 {pCapex > 0 ? `¥${fmtNum(pCapex)}` : '未配置'}
-                  </p>
-                </div>
-
-                <div className="bg-fill-1/35 p-4 lg:p-5">
-                  <p className="text-[12px] font-medium text-fg-2">静态投资回收期（模拟）</p>
-                  <p className="mt-1.5 text-[24px] font-semibold leading-[30px] text-fg">
-                    {pbBase != null ? (
-                      <>
-                        {pbBase.toFixed(2)} <span className="text-[13px] font-normal text-muted">年</span>
-                      </>
-                    ) : (
-                      <span className="text-[16px] text-warning">不可计算</span>
-                    )}
-                  </p>
-                  <p className="mt-1 text-[11px] text-muted">
-                    {pbHigh != null && pbLow != null
-                      ? `乐观 ${pbHigh.toFixed(2)} 年 ~ 保守 ${pbLow.toFixed(2)} 年`
-                      : '需配置单价、投资额及节能量'}
-                  </p>
-                </div>
+              <div className="flex flex-wrap items-center gap-4 text-[12px]">
+                <span>
+                  <span className="text-muted">年化基线：</span>
+                  <strong className="font-semibold text-fg">
+                    {annBase != null ? `${fmtNum(annBase)} ${active.unit}` : '缺有效基线'}
+                  </strong>
+                </span>
+                <span>
+                  <span className="text-muted">基准节能量：</span>
+                  <strong className="font-semibold text-primary">
+                    {fmtNum(pBase)} {active.unit}
+                  </strong>
+                  {rateBase != null && <span className="ml-1 text-[11px] text-positive">({fmtPct(rateBase)})</span>}
+                </span>
+                <span>
+                  <span className="text-muted">基准节费：</span>
+                  <strong className="font-semibold text-fg">
+                    {costBase != null ? `¥${fmtNum(Math.round(costBase))}` : '不可计算'}
+                  </strong>
+                </span>
+                <span>
+                  <span className="text-muted">静态回收期：</span>
+                  <strong className="font-semibold text-primary">
+                    {pbBase != null ? `${pbBase.toFixed(2)} 年` : '不可计算'}
+                  </strong>
+                </span>
               </div>
             </section>
 
-            {/* ── 2. Primary Stage: 3-Scenario Visuals (8 cols) + Live Synchronized Parameter Controls (4 cols) ── */}
+            {/* ── 2. Interactive Modeling Lab Layout: Left 4-Col Parameter Deck -> Right 8-Col Breakeven & Scenario Canvas ── */}
             <div className="grid items-start gap-4 lg:grid-cols-12">
-              <section className="arco-card space-y-5 p-5 lg:col-span-8">
-                <div>
-                  <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-                    <div>
-                      <h3 className="text-[15px] font-medium leading-[22px] text-fg">三情景累计参考节费与静态投资回收期曲线</h3>
-                      <p className="mt-0.5 text-[12px] text-muted">
-                        保守 / 基准 / 乐观三条累计节费曲线与改造投资门槛（橙色虚线）的交点即为各情景静态回收期
-                      </p>
-                    </div>
-                  </div>
-                  <RetrofitEconomicsChart
-                    capex={pCapex}
-                    costLow={costLow}
-                    costBase={costBase}
-                    costHigh={costHigh}
-                    paybackLow={pbLow}
-                    paybackBase={pbBase}
-                    paybackHigh={pbHigh}
-                    priceConfigured={pPriceConfigured}
-                    height={244}
-                  />
-                </div>
-
-                <div className="border-t border-line pt-4">
-                  <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-                    <h3 className="text-[14px] font-medium text-fg">三情景年节能量区间对照（{active.unit}/年）</h3>
-                    <span className="text-[11px] text-muted">同步响应右侧参数调整</span>
-                  </div>
-                  <RetrofitScenarioChart
-                    low={pLow}
-                    base={pBase}
-                    high={pHigh}
-                    costLow={costLow}
-                    costBase={costBase}
-                    costHigh={costHigh}
-                    paybackLow={pbLow}
-                    paybackBase={pbBase}
-                    paybackHigh={pbHigh}
-                    unit={active.unit}
-                  />
-                </div>
-              </section>
-
-              {/* Right 4 Cols: Live Synchronized Parameter Sensitivity Panel (Always Accessible!) */}
+              {/* Left 4 Cols: Live Parameter Control Deck */}
               <aside aria-label="关键测算参数联动调整" className="arco-card p-5 text-[12px] lg:col-span-4">
                 <form onSubmit={handleUpdateScenarios} className="space-y-3.5 tabular">
                   <div className="border-b border-line pb-2.5">
-                    <h3 className="text-[14px] font-medium text-fg">关键测算参数实时调整</h3>
+                    <h3 className="text-[14px] font-semibold text-fg">参数灵敏度控制面板</h3>
                     <p className="mt-0.5 text-[11px] text-muted">
-                      修改参数后左侧图表与指标立即联动预览；留空单价或投资额将如实显示“不可计算”
+                      调节节能量、单价或投资额后，右侧回收期曲线与情景表实时响应；缺单价/投资时如实标记不可计算
                     </p>
                   </div>
 
@@ -1593,8 +1550,14 @@ export function RetrofitWorkspace({
                   </div>
 
                   {/* Transparent Formula Breakdown */}
-                  <div className="rounded-[4px] bg-fill-1/60 p-3 text-[11px] text-muted space-y-1">
-                    <div className="font-medium text-fg-2">基准情景计算链路（模拟）</div>
+                  <div className="space-y-1 rounded-[4px] bg-fill-1/60 p-3 text-[11px] text-muted">
+                    <div className="font-medium text-fg-2">基准情景推导链路（模拟）</div>
+                    <div>
+                      改造后预计用能 ={' '}
+                      <strong className="text-fg">
+                        {postBaseUsage != null ? `${fmtNum(postBaseUsage)} ${active.unit}/年` : '缺少基线'}
+                      </strong>
+                    </div>
                     <div>
                       预计年节费 = {fmtNum(pBase)} × {pPriceConfigured ? `¥${pPrice}` : '缺单价'} ={' '}
                       <strong className="text-fg">{costBase != null ? `¥${fmtNum(Math.round(costBase))}` : '不可计算'}</strong>
@@ -1602,7 +1565,7 @@ export function RetrofitWorkspace({
                     <div>
                       静态回收期 = {pCapex > 0 ? `¥${fmtNum(pCapex)}` : '缺投资'} ÷{' '}
                       {costBase != null ? `¥${fmtNum(Math.round(costBase))}` : '缺节费'} ={' '}
-                      <strong className="text-fg">{pbBase != null ? `${pbBase.toFixed(2)} 年` : '不可计算'}</strong>
+                      <strong className="text-primary">{pbBase != null ? `${pbBase.toFixed(2)} 年` : '不可计算'}</strong>
                     </div>
                   </div>
 
@@ -1633,51 +1596,102 @@ export function RetrofitWorkspace({
                   </div>
                 </form>
               </aside>
-            </div>
 
-            {/* ── 3. Detailed 3-Scenario Comparison Matrix ── */}
-            <section className="arco-card overflow-x-auto">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-3">
-                <h3 className="text-[14px] font-medium text-fg">三情景差异分析明细表（模拟测算）</h3>
-                <span className="text-[11px] text-muted">所有经济性测算结果均为模型估算，正式核验节能量以 F20 M&amp;V 为准</span>
+              {/* Right 8 Cols: Payback Breakeven Curves + Scenario Range + Docked Comparison Matrix */}
+              <div className="space-y-4 lg:col-span-8">
+                <section className="arco-card space-y-5 p-5">
+                  <div>
+                    <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+                      <div>
+                        <h3 className="text-[15px] font-medium leading-[22px] text-fg">三情景累计参考节费与静态投资回收期曲线</h3>
+                        <p className="mt-0.5 text-[12px] text-muted">
+                          保守 / 基准 / 乐观三条累计节费曲线与改造投资门槛（橙色虚线）的交点即为各情景静态回收期
+                        </p>
+                      </div>
+                      {pbHigh != null && pbLow != null && (
+                        <span className="text-[11px] text-muted tabular">
+                          回收期区间：{pbHigh.toFixed(2)} ~ {pbLow.toFixed(2)} 年
+                        </span>
+                      )}
+                    </div>
+                    <RetrofitEconomicsChart
+                      capex={pCapex}
+                      costLow={costLow}
+                      costBase={costBase}
+                      costHigh={costHigh}
+                      paybackLow={pbLow}
+                      paybackBase={pbBase}
+                      paybackHigh={pbHigh}
+                      priceConfigured={pPriceConfigured}
+                      height={236}
+                    />
+                  </div>
+
+                  <div className="border-t border-line pt-4">
+                    <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+                      <h3 className="text-[14px] font-medium text-fg">三情景年节能量区间对照（{active.unit}/年）</h3>
+                      <span className="text-[11px] text-muted">实时同步左侧控制面板</span>
+                    </div>
+                    <RetrofitScenarioChart
+                      low={pLow}
+                      base={pBase}
+                      high={pHigh}
+                      costLow={costLow}
+                      costBase={costBase}
+                      costHigh={costHigh}
+                      paybackLow={pbLow}
+                      paybackBase={pbBase}
+                      paybackHigh={pbHigh}
+                      unit={active.unit}
+                    />
+                  </div>
+                </section>
+
+                {/* Docked 3-Scenario Comparison Matrix */}
+                <section className="arco-card overflow-x-auto">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-2.5">
+                    <h3 className="text-[13px] font-medium text-fg">三情景差异分析明细（模拟测算 · 正式成果以 F20 M&amp;V 为准）</h3>
+                    <span className="text-[11px] text-muted">基线 {active.baselineVersion}</span>
+                  </div>
+                  <table className="w-full text-left text-[12px]">
+                    <thead className="border-b border-line bg-fill-1 text-fg-2">
+                      <tr>
+                        <th className="px-4 py-2 font-medium">评估情景</th>
+                        <th className="px-4 py-2 text-right font-medium">年节能量 ({active.unit})</th>
+                        <th className="px-4 py-2 text-right font-medium">改造后年用能</th>
+                        <th className="px-4 py-2 text-right font-medium">预计节能率</th>
+                        <th className="px-4 py-2 text-right font-medium">年参考节费</th>
+                        <th className="px-4 py-2 text-right font-medium">静态回收期</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-line tabular">
+                      {[
+                        { label: '保守情景 (Low)', sav: pLow, rate: rateLow, cost: costLow, pb: pbLow, accent: false },
+                        { label: '基准情景 (Base · 推荐)', sav: pBase, rate: rateBase, cost: costBase, pb: pbBase, accent: true },
+                        { label: '乐观情景 (High)', sav: pHigh, rate: rateHigh, cost: costHigh, pb: pbHigh, accent: false },
+                      ].map((sc) => (
+                        <tr key={sc.label} className={sc.accent ? 'bg-primary-soft/25' : ''}>
+                          <td className="px-4 py-2 font-medium text-fg">{sc.label}</td>
+                          <td className="px-4 py-2 text-right font-semibold text-fg">{fmtNum(sc.sav)}</td>
+                          <td className="px-4 py-2 text-right text-fg-2">
+                            {annBase != null ? fmtNum(Math.max(0, annBase - sc.sav)) : <span className="text-warning">缺少基线</span>}
+                          </td>
+                          <td className="px-4 py-2 text-right text-fg-2">
+                            {sc.rate != null ? fmtPct(sc.rate) : <span className="text-warning">缺少基线</span>}
+                          </td>
+                          <td className="px-4 py-2 text-right font-medium text-fg">
+                            {pPriceConfigured && sc.cost != null ? `¥${fmtNum(Math.round(sc.cost))}` : <span className="text-warning">缺单价</span>}
+                          </td>
+                          <td className="px-4 py-2 text-right font-semibold text-primary">
+                            {sc.pb != null ? `${sc.pb.toFixed(2)} 年` : <span className="font-normal text-warning">不可计算</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </section>
               </div>
-              <table className="w-full text-left text-[12px]">
-                <thead className="border-b border-line bg-fill-1 text-fg-2">
-                  <tr>
-                    <th className="px-4 py-2.5 font-medium">评估情景</th>
-                    <th className="px-4 py-2.5 text-right font-medium">预计年节能量 ({active.unit})</th>
-                    <th className="px-4 py-2.5 text-right font-medium">改造后预计年用能 ({active.unit})</th>
-                    <th className="px-4 py-2.5 text-right font-medium">预计节能率</th>
-                    <th className="px-4 py-2.5 text-right font-medium">年度参考节省费用</th>
-                    <th className="px-4 py-2.5 text-right font-medium">静态投资回收期</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-line tabular">
-                  {[
-                    { label: '保守情景 (Low)', sav: pLow, rate: rateLow, cost: costLow, pb: pbLow, accent: false },
-                    { label: '基准情景 (Base · 推荐)', sav: pBase, rate: rateBase, cost: costBase, pb: pbBase, accent: true },
-                    { label: '乐观情景 (High)', sav: pHigh, rate: rateHigh, cost: costHigh, pb: pbHigh, accent: false },
-                  ].map((sc) => (
-                    <tr key={sc.label} className={sc.accent ? 'bg-primary-soft/25' : ''}>
-                      <td className="px-4 py-2.5 font-medium text-fg">{sc.label}</td>
-                      <td className="px-4 py-2.5 text-right font-semibold text-fg">{fmtNum(sc.sav)}</td>
-                      <td className="px-4 py-2.5 text-right text-fg-2">
-                        {annBase != null ? fmtNum(Math.max(0, annBase - sc.sav)) : <span className="text-warning">缺少有效基线</span>}
-                      </td>
-                      <td className="px-4 py-2.5 text-right text-fg-2">
-                        {sc.rate != null ? fmtPct(sc.rate) : <span className="text-warning">缺少基线</span>}
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-medium text-fg">
-                        {pPriceConfigured && sc.cost != null ? `¥${fmtNum(Math.round(sc.cost))}` : <span className="text-warning">不可计算（缺单价）</span>}
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-semibold text-primary">
-                        {sc.pb != null ? `${sc.pb.toFixed(2)} 年` : <span className="font-normal text-warning">不可计算</span>}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </section>
+            </div>
           </div>
         );
       })()}

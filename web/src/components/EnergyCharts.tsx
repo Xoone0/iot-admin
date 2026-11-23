@@ -3440,7 +3440,7 @@ export function RetrofitEconomicsChart({
 
           {/* Capex horizontal breakeven line */}
           <line x1={pad.left} x2={W - pad.right} y1={capexY} y2={capexY} stroke="#FF7D00" strokeWidth={1.6} strokeDasharray="5 4" />
-          <text x={W - pad.right - 4} y={Math.max(pad.top + 10, capexY - 6)} textAnchor="end" className="fill-warning text-[10px] font-medium">
+          <text x={pad.left + 6} y={Math.max(pad.top + 10, capexY - 6)} textAnchor="start" className="fill-warning text-[10px] font-medium">
             投资回收门槛 ¥{fmtVal(capex)}
           </text>
 
@@ -3526,6 +3526,415 @@ export function RetrofitEconomicsChart({
             </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ── 15. DiagnosticQuadrantChart (F16 Volume × Intensity × Anomaly 2D Matrix) ─
+// Visually separates High Volume (X), High Area Intensity (Y), and Anomaly Growth
+// (amber outer ring) in one iconic diagnostic scatter plot — completely distinct
+// from F07's horizontal ranking bars.
+
+export type QuadrantPoint = {
+  id: string;
+  name: string;
+  subLabel?: string;
+  usage: number | null;
+  intensity: number | null;
+  isAnomalyCandidate?: boolean;
+  anomalyRate?: number | null;
+  comparable: boolean;
+  reason?: string;
+};
+
+export function DiagnosticQuadrantChart({
+  points,
+  unit,
+  intensityUnit,
+  selectedId,
+  onSelect,
+  height = 310,
+}: {
+  points: QuadrantPoint[];
+  unit: string;
+  intensityUnit: string;
+  selectedId?: string | null;
+  onSelect?: (id: string) => void;
+  height?: number;
+}) {
+  const [hoverId, setHoverId] = useState<string | null>(null);
+
+  const plottable = useMemo(
+    () =>
+      points.filter(
+        (p): p is QuadrantPoint & { usage: number; intensity: number } =>
+          p.comparable && p.usage != null && p.intensity != null,
+      ),
+    [points],
+  );
+  const excluded = useMemo(
+    () => points.filter((p) => !p.comparable || p.usage == null || p.intensity == null),
+    [points],
+  );
+
+  if (plottable.length === 0) {
+    return (
+      <div className="flex h-[240px] flex-col items-center justify-center gap-1 rounded-[4px] border border-dashed border-line bg-fill-1/40 text-[12px] text-muted">
+        <span>当前对象缺少有效面积或不可比，无法绘制「用量 × 面积强度」二维诊断象限</span>
+      </div>
+    );
+  }
+
+  const maxX = Math.max(...plottable.map((p) => p.usage), 1);
+  const maxY = Math.max(...plottable.map((p) => p.intensity), 0.01);
+  const xScale = niceScale(maxX * 1.18, 4);
+  const yScale = niceScale(maxY * 1.22, 4);
+
+  const avgX = plottable.reduce((s, p) => s + p.usage, 0) / plottable.length;
+  const avgY = plottable.reduce((s, p) => s + p.intensity, 0) / plottable.length;
+
+  const W = 780;
+  const H = height;
+  const pad = { top: 28, right: 28, bottom: 38, left: 64 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+
+  const xAt = (v: number) => pad.left + (Math.max(0, v) / xScale.max) * plotW;
+  const yAt = (v: number) => pad.top + plotH - (Math.max(0, v) / yScale.max) * plotH;
+
+  const midX = xAt(avgX);
+  const midY = yAt(avgY);
+  const activePt = plottable.find((p) => p.id === (hoverId ?? selectedId)) ?? null;
+
+  return (
+    <div className="space-y-2 tabular">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted">
+        <div className="flex flex-wrap items-center gap-3.5">
+          <span className="inline-flex items-center gap-1.5 text-fg-2">
+            <span className="size-2.5 rounded-full bg-primary" />常规高耗对象
+          </span>
+          <span className="inline-flex items-center gap-1.5 text-warning">
+            <span className="size-2.5 rounded-full border-2 border-warning bg-warning/25" />叠加异常增长候选
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="w-3.5 border-t border-dashed border-[#86909C]" />均值象限线
+          </span>
+        </div>
+        <span>点击气泡联动右侧趋势、分项与溯源明细</span>
+      </div>
+
+      <div className="relative w-full" onMouseLeave={() => setHoverId(null)}>
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full overflow-visible" role="img" aria-label="高耗能对象用量与面积强度二维诊断象限图">
+          {/* Subtle Top-Right Priority Zone Tint */}
+          <rect
+            x={midX}
+            y={pad.top}
+            width={Math.max(0, W - pad.right - midX)}
+            height={Math.max(0, midY - pad.top)}
+            fill="#F53F3F"
+            fillOpacity={0.045}
+          />
+          {/* Subtle Top-Left Efficiency Zone Tint */}
+          <rect
+            x={pad.left}
+            y={pad.top}
+            width={Math.max(0, midX - pad.left)}
+            height={Math.max(0, midY - pad.top)}
+            fill="#FF7D00"
+            fillOpacity={0.035}
+          />
+
+          {/* Gridlines */}
+          {yScale.steps.map((v) => {
+            const y = yAt(v);
+            return (
+              <g key={`y-${v}`}>
+                <line x1={pad.left} x2={W - pad.right} y1={y} y2={y} stroke="var(--line)" strokeDasharray={v === 0 ? undefined : '3 3'} />
+                <text x={pad.left - 8} y={y + 4} textAnchor="end" className="fill-muted text-[10px]">
+                  {v < 1 && v > 0 ? v.toFixed(2) : fmtCompact(v)}
+                </text>
+              </g>
+            );
+          })}
+          {xScale.steps.map((v) => {
+            const x = xAt(v);
+            return (
+              <g key={`x-${v}`}>
+                <line x1={x} x2={x} y1={pad.top} y2={pad.top + plotH} stroke="var(--line)" strokeDasharray={v === 0 ? undefined : '3 3'} />
+                <text x={x} y={H - 16} textAnchor="middle" className="fill-muted text-[10px]">
+                  {fmtCompact(v)}
+                </text>
+              </g>
+            );
+          })}
+
+          {/* Axis Labels */}
+          <text x={pad.left - 8} y={14} textAnchor="end" className="fill-muted text-[10px]">
+            {intensityUnit}
+          </text>
+          <text x={W - pad.right} y={H - 2} textAnchor="end" className="fill-muted text-[10px]">
+            用能总量 ({unit})
+          </text>
+
+          {/* Mean Quadrant Dividers */}
+          <line x1={midX} x2={midX} y1={pad.top} y2={pad.top + plotH} stroke="#86909C" strokeWidth={1.2} strokeDasharray="4 4" />
+          <line x1={pad.left} x2={W - pad.right} y1={midY} y2={midY} stroke="#86909C" strokeWidth={1.2} strokeDasharray="4 4" />
+
+          {/* Quadrant Corner Labels */}
+          <text x={W - pad.right - 6} y={pad.top + 14} textAnchor="end" className="fill-negative text-[10px] font-medium opacity-85">
+            高用量 · 高强度（优先治理）
+          </text>
+          <text x={pad.left + 6} y={pad.top + 14} textAnchor="start" className="fill-warning text-[10px] font-medium opacity-85">
+            低用量 · 高强度（能效挖潜）
+          </text>
+          <text x={W - pad.right - 6} y={pad.top + plotH - 6} textAnchor="end" className="fill-muted text-[10px]">
+            高用量 · 低强度（体量驱动）
+          </text>
+          <text x={pad.left + 6} y={pad.top + plotH - 6} textAnchor="start" className="fill-muted text-[10px]">
+            双低常态区
+          </text>
+
+          {/* Bubbles */}
+          {plottable.map((pt) => {
+            const cx = xAt(pt.usage);
+            const cy = yAt(pt.intensity);
+            const isSel = selectedId === pt.id;
+            const isHov = hoverId === pt.id;
+            const isPriority = pt.usage >= avgX && pt.intensity >= avgY;
+            const fill = pt.isAnomalyCandidate
+              ? '#FF7D00'
+              : isPriority
+                ? '#F53F3F'
+                : isSel
+                  ? '#165DFF'
+                  : '#3491FA';
+            const r = isSel || isHov ? 8.5 : isPriority ? 7 : 5.8;
+            const shortName = pt.name.length > 10 ? `${pt.name.slice(0, 10)}…` : pt.name;
+            const labelLeft = cx > pad.left + plotW * 0.72;
+            return (
+              <g
+                key={pt.id}
+                className="cursor-pointer"
+                onMouseEnter={() => setHoverId(pt.id)}
+                onClick={() => onSelect?.(pt.id)}
+              >
+                {pt.isAnomalyCandidate && (
+                  <circle cx={cx} cy={cy} r={r + 5} fill="#FF7D00" fillOpacity={0.18} stroke="#FF7D00" strokeWidth={1.2} strokeDasharray="2 2" />
+                )}
+                {isSel && <circle cx={cx} cy={cy} r={r + 3.5} fill="none" stroke="#165DFF" strokeWidth={1.8} />}
+                <circle cx={cx} cy={cy} r={r} fill={fill} fillOpacity={isSel || isHov ? 1 : 0.85} stroke="var(--surface)" strokeWidth={1.8} />
+                {(isSel || isHov || isPriority || plottable.length <= 6) && (
+                  <text
+                    x={labelLeft ? cx - r - 6 : cx + r + 6}
+                    y={cy + 3.5}
+                    textAnchor={labelLeft ? 'end' : 'start'}
+                    className={`text-[10px] ${isSel || isHov ? 'fill-fg font-semibold' : 'fill-fg-2'}`}
+                  >
+                    {shortName}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+        </svg>
+
+        {activePt && (
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-2 rounded-[2px] bg-fill-1 px-3 py-1.5 text-[11px]">
+            <span className="font-medium text-fg">
+              {activePt.name}
+              {activePt.subLabel ? <span className="ml-1.5 font-normal text-muted">({activePt.subLabel})</span> : null}
+            </span>
+            <div className="flex flex-wrap items-center gap-3">
+              <span>用量 <strong className="text-fg">{fmtVal(activePt.usage)} {unit}</strong></span>
+              <span>面积强度 <strong className="text-primary">{fmtVal(activePt.intensity)} {intensityUnit}</strong></span>
+              {activePt.isAnomalyCandidate && activePt.anomalyRate != null && (
+                <span className="font-medium text-warning">异常增长 +{pctFmt.format(activePt.anomalyRate)}</span>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {excluded.length > 0 && (
+        <p className="text-[11px] text-warning">
+          另有 {excluded.length} 个对象因缺少有效面积或覆盖率不足未投点：{excluded.map((e) => e.name).join('、')}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ── 16. SpatialHierarchyMap (F03 Nested Floor/Zone Blueprint Canvas) ────────
+// Visually embeds child spaces INSIDE their parent container block while
+// separating direct parent metering vs child space metering (zero double-count).
+
+export type SpatialMapNode = {
+  id: string;
+  name: string;
+  usage: number | null;
+  areaSqm?: number | null;
+  coverageRate: number | null;
+  comparable: boolean;
+  meterCount: number;
+  subtreeUsage: number | null;
+  children: Array<{
+    id: string;
+    name: string;
+    usage: number | null;
+    areaSqm?: number | null;
+    coverageRate: number | null;
+    comparable: boolean;
+    meterCount: number;
+  }>;
+};
+
+export function SpatialHierarchyMap({
+  nodes,
+  buildingTotal,
+  unit,
+  selectedId,
+  onSelect,
+}: {
+  nodes: SpatialMapNode[];
+  buildingTotal: number | null;
+  unit: string;
+  selectedId?: string | null;
+  onSelect: (id: string) => void;
+}) {
+  if (nodes.length === 0) {
+    return (
+      <div className="flex h-[180px] items-center justify-center rounded-[4px] border border-dashed border-line bg-fill-1/40 text-[12px] text-muted">
+        当前建筑尚未配置空间归属拓扑
+      </div>
+    );
+  }
+
+  const totalRef = Math.max(
+    buildingTotal ?? 0,
+    nodes.reduce((s, n) => s + (n.subtreeUsage ?? n.usage ?? 0), 0),
+    1,
+  );
+
+  return (
+    <div className="space-y-3 tabular">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted">
+        <span>区域色块按用能占比分配视觉权重；子空间嵌套于所属父空间内部，直属表计严格隔离不重复累计</span>
+        <span className="inline-flex items-center gap-3">
+          <span className="inline-flex items-center gap-1"><span className="size-2 rounded-[1px] bg-primary" />高耗能主区</span>
+          <span className="inline-flex items-center gap-1"><span className="size-2 rounded-[1px] bg-[#0FC6C2]" />嵌套子空间</span>
+        </span>
+      </div>
+
+      {/* 2D Proportional Spatial Grid */}
+      <div className="grid gap-3 md:grid-cols-12">
+        {nodes.map((node, idx) => {
+          const share = (node.subtreeUsage ?? node.usage ?? 0) / totalRef;
+          // Allocate 12-col width proportionally (min 4 cols, max 8 cols when 2+ nodes)
+          const colSpan =
+            nodes.length === 1
+              ? 'md:col-span-12'
+              : share >= 0.55
+                ? 'md:col-span-7'
+                : share >= 0.3
+                  ? 'md:col-span-5'
+                  : 'md:col-span-4';
+          const isSel = selectedId === node.id;
+          const isHot = idx === 0 && share >= 0.4;
+          const directShare = buildingTotal && node.usage != null ? node.usage / buildingTotal : null;
+
+          return (
+            <div
+              key={node.id}
+              className={`${colSpan} flex flex-col justify-between rounded-[4px] border p-4 transition-colors ${
+                isSel
+                  ? 'border-primary bg-primary-soft/30'
+                  : isHot
+                    ? 'border-primary/40 bg-primary-soft/15'
+                    : 'border-line bg-surface'
+              }`}
+            >
+              {/* Parent Direct Space Clickable Area */}
+              <button
+                type="button"
+                data-space-node={node.id}
+                onClick={() => onSelect(node.id)}
+                className="w-full text-left"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <div className="flex items-center gap-1.5">
+                      <span className={`inline-block size-2 rounded-full ${isHot ? 'bg-primary' : 'bg-[#3491FA]'}`} />
+                      <span className="text-[14px] font-semibold text-fg">{node.name}</span>
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-muted">
+                      {node.children.length > 0 ? '父级直属空间' : '独立空间'}
+                      {node.areaSqm ? ` · ${fmtVal(node.areaSqm)} m²` : ''}
+                      {` · ${node.meterCount} 块表 · 覆盖 ${node.coverageRate != null ? pctFmt.format(node.coverageRate) : '—'}`}
+                    </p>
+                  </div>
+                  <span className={`rounded-[2px] px-1.5 py-0 text-[11px] font-medium ${isHot ? 'bg-primary text-white' : 'bg-fill-2 text-fg-2'}`}>
+                    占建筑 {pctFmt.format(share)}
+                  </span>
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-baseline gap-2">
+                  <span className="text-[24px] font-semibold leading-[30px] text-fg">
+                    {fmtVal(node.usage)}
+                    <span className="ml-1 text-[12px] font-normal text-muted">{unit}</span>
+                  </span>
+                  {node.children.length > 0 && directShare != null && (
+                    <span className="text-[11px] text-muted">
+                      直属占比 {pctFmt.format(directShare)} · 含子区参考 {fmtVal(node.subtreeUsage)} {unit}
+                    </span>
+                  )}
+                </div>
+              </button>
+
+              {/* Physically Nested Child Space Tiles inside Parent Boundary */}
+              {node.children.length > 0 && (
+                <div className="mt-3.5 space-y-2 border-t border-dashed border-line pt-3">
+                  <div className="flex items-center justify-between text-[10px] text-muted">
+                    <span>下级子空间（独立表计，建筑总计不重复累加）</span>
+                    <span>{node.children.length} 个子区</span>
+                  </div>
+                  <div className="grid gap-2">
+                    {node.children.map((ch) => {
+                      const chSel = selectedId === ch.id;
+                      const chShare = buildingTotal && ch.usage != null ? ch.usage / buildingTotal : null;
+                      return (
+                        <button
+                          key={ch.id}
+                          type="button"
+                          data-space-node={ch.id}
+                          onClick={() => onSelect(ch.id)}
+                          className={`rounded-[4px] border px-3 py-2.5 text-left transition-colors ${
+                            chSel
+                              ? 'border-primary bg-surface ring-1 ring-primary/40'
+                              : 'border-[#0FC6C2]/45 bg-[#E8FFFB]/45 hover:bg-[#E8FFFB]/80'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[12px] font-medium text-fg">└ {ch.name}</span>
+                            <span className="text-[13px] font-semibold text-fg">
+                              {fmtVal(ch.usage)} <span className="text-[10px] font-normal text-muted">{unit}</span>
+                            </span>
+                          </div>
+                          <div className="mt-1 flex items-center justify-between text-[10px] text-muted">
+                            <span>
+                              子空间独立计量{ch.areaSqm ? ` · ${fmtVal(ch.areaSqm)} m²` : ''} · {ch.meterCount} 块表
+                            </span>
+                            <span>{chShare != null ? `占建筑 ${pctFmt.format(chShare)}` : '—'}</span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

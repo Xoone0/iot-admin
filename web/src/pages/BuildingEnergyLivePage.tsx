@@ -11,6 +11,7 @@ import {
   CHART_PALETTE,
   CumulativeTargetBurnupChart,
   DeviationDivergingChart,
+  DiagnosticQuadrantChart,
   DiscreteSampleCompareChart,
   EnergyFlowBalanceChart,
   EnergyStructureChart,
@@ -18,6 +19,7 @@ import {
   PeriodVarianceBarChart,
   ScoreDistributionChart,
   ScoreGaugeChart,
+  SpatialHierarchyMap,
   StackedCategoryTrendChart,
   TargetComparisonChart,
   TrendAreaChart,
@@ -517,6 +519,11 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
   const [token, setToken] = useState<string>(() => sessionStorage.getItem(LIVE_TOKEN_KEY) ?? '');
   const [tokenDraft, setTokenDraft] = useState<string>(token);
   const [devAuthTried, setDevAuthTried] = useState<boolean>(() => Boolean(sessionStorage.getItem(LIVE_TOKEN_KEY)));
+  const [isLanGateway, setIsLanGateway] = useState<boolean>(false);
+  const [lanAuthed, setLanAuthed] = useState<boolean>(false);
+  const [lanPasscode, setLanPasscode] = useState<string>('');
+  const [lanBusy, setLanBusy] = useState<boolean>(false);
+  const [lanErr, setLanErr] = useState<string | null>(null);
   const [inventory, setInventory] = useState<InventoryData | null>(null);
   const [payload, setPayload] = useState<{ section: LiveSection; data: unknown } | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
@@ -581,6 +588,41 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
     setRefreshTick((n) => n + 1);
   };
 
+  const submitLanPasscode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLanBusy(true);
+    setLanErr(null);
+    try {
+      const res = await fetch('/lan-auth/login', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passcode: lanPasscode.trim() }),
+      });
+      const body = (await res.json().catch(() => null)) as { authenticated?: boolean; message?: string } | null;
+      if (!res.ok || !body?.authenticated) {
+        setLanErr(body?.message ?? '局域网口令验证失败');
+        return;
+      }
+      setLanPasscode('');
+      setLanAuthed(true);
+      setAuthError(null);
+      setRefreshTick((n) => n + 1);
+    } catch {
+      setLanErr('无法连接局域网认证入口，请检查网络状态');
+    } finally {
+      setLanBusy(false);
+    }
+  };
+
+  const logoutLanSession = async () => {
+    await fetch('/lan-auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => null);
+    setLanAuthed(false);
+    setInventory(null);
+    setPayload(null);
+    setAuthError('局域网演示会话已退出，请重新输入演示口令登录');
+  };
+
   const buildEndpoint = useCallback(() => {
     const qs = new URLSearchParams();
     if (building) qs.set('building', building);
@@ -624,11 +666,34 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
 
   useEffect(() => {
     if (token || devAuthTried) return;
+    let cancelled = false;
+    const host = window.location.hostname;
+    const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+
+    // Non-loopback host (LAN gateway): NEVER invoke loopback dev-auth auto-login!
+    if (!isLoopback) {
+      fetch('/lan-auth/status', { credentials: 'same-origin' })
+        .then(async (r) => (r.ok ? ((await r.json()) as { lanGateway?: boolean; authenticated?: boolean }) : null))
+        .then((body) => {
+          if (cancelled) return;
+          if (body?.lanGateway) {
+            setIsLanGateway(true);
+            setLanAuthed(Boolean(body.authenticated));
+          }
+          setDevAuthTried(true);
+        })
+        .catch(() => {
+          if (!cancelled) setDevAuthTried(true);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+
     if (!import.meta.env.DEV) {
       setDevAuthTried(true);
       return;
     }
-    let cancelled = false;
     fetch('/admin/v1/dev-auth/session', { method: 'POST', credentials: 'same-origin' })
       .then(async (r) => (r.ok ? ((await r.json()) as { token?: string }) : null))
       .then((body) => {
@@ -868,35 +933,80 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin text-primary' : 'text-fg-2'}`} aria-hidden="true" />
             <span className="hidden sm:inline">刷新</span>
           </button>
+          {isLanGateway && lanAuthed && (
+            <button
+              type="button"
+              data-lan-logout
+              onClick={logoutLanSession}
+              className="arco-btn text-fg-2"
+            >
+              <span>退出局域网会话</span>
+            </button>
+          )}
         </div>
       </div>
 
       {/* Mobile Compact Filter Drawer */}
       {showFilterBar && <MobileFilterDrawer summary={filterSummaryText}>{filterControls}</MobileFilterDrawer>}
 
-      {/* Fail-closed Auth Gate */}
+      {/* Fail-closed Auth Gate (LAN Passcode Session Gate or Bearer Token Gate) */}
       {authError && (
         <section className="rounded-[4px] border border-warning/40 bg-surface p-5">
           <div className="flex items-start gap-3">
             <KeyRound className="mt-0.5 h-5 w-5 shrink-0 text-warning" aria-hidden="true" />
             <div className="min-w-0 flex-1 space-y-3">
-              <div>
-                <h2 className="text-sm font-semibold text-fg">需要可信身份凭据（默认拒绝模式）</h2>
-                <p className="mt-1 text-xs text-muted">{authError}</p>
-              </div>
-              <form onSubmit={applyToken} className="flex flex-wrap items-center gap-2">
-                <input
-                  type="password"
-                  value={tokenDraft}
-                  onChange={(e) => setTokenDraft(e.target.value)}
-                  placeholder="粘贴经服务端签名的 Bearer Token（仅存于当前会话）"
-                  aria-label="Bearer Token"
-                  className="min-w-[260px] flex-1 rounded-[4px] border border-line bg-surface-2 px-3 py-1.5 text-xs text-fg"
-                />
-                <button type="submit" className="rounded-[4px] bg-primary px-4 py-1.5 text-xs font-medium text-white">
-                  应用凭据并加载
-                </button>
-              </form>
+              {isLanGateway ? (
+                <>
+                  <div>
+                    <h2 className="text-sm font-semibold text-fg">局域网演示访问认证（默认拒绝模式）</h2>
+                    <p className="mt-1 text-xs text-muted">{authError}</p>
+                    <p className="mt-1 text-[11px] text-warning">
+                      安全边界：当前 HTTP 入口仅用于可信局域网临时模拟数据演示；严禁直接依赖本地开发自动登录。传输真实生产数据或长期多用户访问须采用 HTTPS 与企业正式身份认证。
+                    </p>
+                  </div>
+                  <form onSubmit={submitLanPasscode} className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="password"
+                      data-lan-passcode-input
+                      value={lanPasscode}
+                      onChange={(e) => setLanPasscode(e.target.value)}
+                      placeholder="输入主机启动脚本生成的局域网演示口令"
+                      aria-label="局域网演示口令"
+                      required
+                      className="min-w-[260px] flex-1 rounded-[4px] border border-line bg-surface-2 px-3 py-1.5 text-xs text-fg"
+                    />
+                    <button
+                      type="submit"
+                      data-lan-login-submit
+                      disabled={lanBusy}
+                      className="rounded-[4px] bg-primary px-4 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+                    >
+                      {lanBusy ? '验证中…' : '验证口令并进入工作台'}
+                    </button>
+                  </form>
+                  {lanErr && <p role="alert" className="text-xs text-negative">{lanErr}</p>}
+                </>
+              ) : (
+                <>
+                  <div>
+                    <h2 className="text-sm font-semibold text-fg">需要可信身份凭据（默认拒绝模式）</h2>
+                    <p className="mt-1 text-xs text-muted">{authError}</p>
+                  </div>
+                  <form onSubmit={applyToken} className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="password"
+                      value={tokenDraft}
+                      onChange={(e) => setTokenDraft(e.target.value)}
+                      placeholder="粘贴经服务端签名的 Bearer Token（仅存于当前会话）"
+                      aria-label="Bearer Token"
+                      className="min-w-[260px] flex-1 rounded-[4px] border border-line bg-surface-2 px-3 py-1.5 text-xs text-fg"
+                    />
+                    <button type="submit" className="rounded-[4px] bg-primary px-4 py-1.5 text-xs font-medium text-white">
+                      应用凭据并加载
+                    </button>
+                  </form>
+                </>
+              )}
             </div>
           </div>
         </section>
@@ -1736,24 +1846,11 @@ function LiveCompositionView({
 
   const focusedCard = energies.find((e) => e.energy === focusEnergy) ?? energies[0] ?? null;
   const focusedLabel = focusedCard ? (energyLabels[focusedCard.energy] ?? focusedCard.energy) : '用电';
-  const prevFocusedCard = (prevComposition?.energies ?? []).find((e) => e.energy === focusedCard?.energy) ?? null;
-
-  const focusedSlices = focusedCard
-    ? [
-        ...(focusedCard.categories ?? []).map((c) => ({ id: c.id, name: c.name, usage: c.usage, share: c.share })),
-        ...(focusedCard.unclassifiedUsage && focusedCard.unclassifiedUsage > 0
-          ? [
-              {
-                id: '__unclassified__',
-                name: '未分项（待分配正式分类）',
-                usage: focusedCard.unclassifiedUsage,
-                share: focusedCard.usage ? focusedCard.unclassifiedUsage / focusedCard.usage : null,
-                isUnclassified: true,
-              },
-            ]
-          : []),
-      ]
-    : [];
+  const prevEnergyMap = useMemo(
+    () => new Map((prevComposition?.energies ?? []).map((e) => [e.energy, e])),
+    [prevComposition?.energies],
+  );
+  const prevFocusedCard = focusedCard ? prevEnergyMap.get(focusedCard.energy) ?? null : null;
 
   // Map category bindings to link clicked category -> exact metering sources & allocation weights.
   const bindingMap = useMemo(() => {
@@ -1827,403 +1924,370 @@ function LiveCompositionView({
   const carbonIncludedCards = energies.filter((e) => e.carbon?.includedInTotal && e.carbon.kgCO2e != null);
   const waterCard = energies.find((e) => e.energy === 'water') ?? null;
   const allSources = energies.flatMap((e) => e.sources ?? []);
+  const prevDateLabel = shiftShanghaiDate(anchorDate, -1);
 
   return (
     <div className="space-y-4">
-      {/* ── 1. Five-Energy Independent Native-Unit Strip (Strictly Never Summed Across Units) ── */}
-      <section aria-label="五能源分品种消费与主力系统总览" className="arco-card overflow-hidden">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-fill-1/50 px-5 py-2 text-[12px] tabular">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium text-fg">{data.buildingName}</span>
-            <span className="text-muted">
-              统计自然日 {anchorDate} · 已绑定分类关系 {data.categoryBindingCount} 条
-            </span>
-          </div>
-          <span className="text-[11px] text-muted">
-            五能源按各自物理单位独立统计构成，严禁跨单位直接相加或计算共同占比
+      {/* ── 1. Compact Scope & Physical-Unit Isolation Strip (Distinct Portfolio Archetype — Zero KPI Box Repetition) ── */}
+      <div className="arco-card flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-[12px] tabular">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <span className="font-semibold text-fg">{data.buildingName}</span>
+          <span className="text-muted">自然日 {anchorDate} · 较前日 {prevDateLabel} 结构变动 (pp)</span>
+          <span className="rounded-[2px] bg-fill-2 px-1.5 py-0 text-[11px] text-fg-2">
+            {energies.length} 类独立能源 · {data.categoryBindingCount} 条分项权重关系
           </span>
         </div>
+        <span className="text-[11px] text-muted">
+          严格按各自物理单位独立构成 100%，不跨单位直接相加；点击任意分项行即刻在底部展开计量溯源
+        </span>
+      </div>
 
-        <div className="grid divide-y divide-line sm:grid-cols-2 lg:grid-cols-5 lg:divide-y-0 lg:divide-x tabular">
-          {energies.map((card) => {
-            const active = card.energy === focusedCard?.energy;
-            const topCat = [...(card.categories ?? [])].sort((a, b) => (b.usage ?? 0) - (a.usage ?? 0))[0] ?? null;
-            const covOk = (card.coverage.rate ?? 0) >= 0.999 && card.coverage.suspect === 0;
-            return (
-              <button
-                key={card.energy}
-                type="button"
-                data-comp-energy={card.energy}
-                onClick={() => setFocusEnergy(card.energy)}
-                className={`relative p-4 text-left transition-colors ${
-                  active
-                    ? 'bg-primary-soft/35 after:absolute after:inset-x-0 after:top-0 after:h-[2px] after:bg-primary'
-                    : 'hover:bg-fill-1/60'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2 text-[12px]">
-                  <span className={`font-medium ${active ? 'text-primary' : 'text-fg-2'}`}>
-                    {energyLabels[card.energy] ?? card.energy}
-                  </span>
-                  <span
-                    className={`rounded-[2px] px-1.5 py-0 text-[10px] leading-[16px] ${
-                      covOk ? 'bg-positive-soft text-positive' : 'bg-warning-soft text-warning'
-                    }`}
-                  >
-                    {fmtPct(card.coverage.rate)}
-                  </span>
-                </div>
-                <p className="mt-2 text-[22px] font-semibold leading-[28px] tracking-[-0.02em] text-fg">
-                  {fmtNum(card.usage)}
-                  <span className="ml-1 text-[12px] font-normal text-muted">{card.unit}</span>
-                </p>
-                <p className="mt-1.5 truncate text-[11px] text-muted">
-                  {topCat
-                    ? `主力：${topCat.name} (${fmtPct(topCat.share)})`
-                    : `${card.meterCount} 块计量点`}
-                </p>
-              </button>
-            );
-          })}
-        </div>
-      </section>
+      {/* ── 2. Primary Stage: 3×2 Five-Energy Native-Unit Portfolio Matrix + Versioned Carbon Conversion Card ── */}
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 tabular">
+        {energies.map((card) => {
+          const isFocus = card.energy === focusedCard?.energy;
+          const prevCard = prevEnergyMap.get(card.energy) ?? null;
+          const prevCatMap = new Map((prevCard?.categories ?? []).map((c) => [c.id, c]));
+          const totalDeltaPct =
+            card.usage != null && prevCard?.usage != null && prevCard.usage > 0
+              ? (card.usage - prevCard.usage) / prevCard.usage
+              : null;
+          const covOk = (card.coverage.rate ?? 0) >= 0.999 && card.coverage.suspect === 0;
+          const cats = [...(card.categories ?? [])].sort((a, b) => (b.usage ?? 0) - (a.usage ?? 0));
+          const hasUnclass = Boolean(card.unclassifiedUsage && card.unclassifiedUsage > 0);
 
-      {/* ── 2. Primary Analytical Stage: Active Energy Structure & Share Evolution (8 cols) + Drilldown & Versioned Carbon (4 cols) ── */}
-      {focusedCard && (
-        <div className="grid items-start gap-4 lg:grid-cols-12">
-          <section className="arco-card space-y-5 p-5 lg:col-span-8">
-            <div className="flex flex-wrap items-center justify-between gap-2">
+          return (
+            <section
+              key={card.energy}
+              data-comp-energy={card.energy}
+              className={`arco-card flex flex-col justify-between overflow-hidden transition-colors ${
+                isFocus ? 'border-primary/60 ring-1 ring-primary/20' : ''
+              }`}
+            >
               <div>
-                <h2 className="text-[15px] font-medium leading-[22px] text-fg">
-                  {focusedLabel}内部用能系统构成与结构变化分析
-                </h2>
-                <p className="mt-0.5 text-[12px] text-muted tabular">
-                  单位 {focusedCard.unit} · {focusedCard.meterCount} 块已配置计量表 · 点击环图或下方系统行联动右侧计量来源下钻
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => onNavigateClassification(focusedCard.energy)}
-                className="inline-flex items-center gap-1 text-[12px] font-medium text-primary hover:underline"
-              >
-                查看 F06 多日分项趋势
-                <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
-            </div>
+                {/* Card Header */}
+                <div
+                  onClick={() => {
+                    if (!isFocus) {
+                      setFocusEnergy(card.energy);
+                      setSelectedCatId(null);
+                    }
+                  }}
+                  className={`cursor-pointer border-b border-line px-4 py-3 ${
+                    isFocus ? 'bg-primary-soft/30' : 'bg-fill-1/40 hover:bg-fill-1/70'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[14px] font-semibold ${isFocus ? 'text-primary' : 'text-fg'}`}>
+                        {energyLabels[card.energy] ?? card.energy}
+                      </span>
+                      <span className="rounded-[2px] border border-line bg-surface px-1.5 py-0 text-[10px] text-muted">
+                        {card.unit}
+                      </span>
+                      <span
+                        className={`rounded-[2px] px-1.5 py-0 text-[10px] leading-[16px] ${
+                          covOk ? 'bg-positive-soft text-positive' : 'bg-warning-soft text-warning'
+                        }`}
+                      >
+                        覆盖 {fmtPct(card.coverage.rate)}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onNavigateClassification(card.energy);
+                      }}
+                      className="inline-flex items-center gap-0.5 text-[11px] font-medium text-primary hover:underline"
+                    >
+                      F06 趋势
+                      <ArrowRight className="h-3 w-3" aria-hidden="true" />
+                    </button>
+                  </div>
 
-            <EnergyStructureChart
-              slices={focusedSlices}
-              totalUsage={focusedCard.usage}
-              unit={focusedCard.unit}
-              selectedId={selectedCatId}
-              onSelectSlice={(id) => setSelectedCatId((cur) => (cur === id ? null : id))}
-            />
-
-            {/* Previous-Day Structural Change Ledger (real D-1 server comparison) */}
-            <div className="border-t border-line pt-4">
-              <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
-                <h3 className="text-[13px] font-medium text-fg">
-                  分项结构变化分析（较前一日 {shiftShanghaiDate(anchorDate, -1)}）
-                </h3>
-                <span className="text-[11px] text-muted">占比变动单位：百分点 (pp) · 仅限当前单一能源内部对比</span>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-[12px]">
-                  <thead className="border-b border-line bg-fill-1 text-fg-2">
-                    <tr>
-                      <th className="px-3 py-2 font-medium">用能系统 / 分项</th>
-                      <th className="px-3 py-2 text-right font-medium">当日用量 ({focusedCard.unit})</th>
-                      <th className="px-3 py-2 text-right font-medium">当日占比</th>
-                      <th className="px-3 py-2 text-right font-medium">前日占比</th>
-                      <th className="px-3 py-2 text-right font-medium">结构变动</th>
-                      <th className="px-3 py-2 text-right font-medium">用量变化</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-line tabular">
-                    {categoryChangeRows.map((row, idx) => {
-                      const isSel = selectedCatId === row.id;
-                      const dotColor = row.isUnclassified ? '#C9CDD4' : CHART_PALETTE[idx % (CHART_PALETTE.length - 1)];
-                      return (
-                        <tr
-                          key={row.id}
-                          onClick={() => setSelectedCatId((cur) => (cur === row.id ? null : row.id))}
-                          className={`cursor-pointer transition-colors ${
-                            isSel ? 'bg-primary-soft/45' : 'hover:bg-fill-1/60'
+                  <div className="mt-2 flex flex-wrap items-baseline justify-between gap-2">
+                    <p className="text-[24px] font-semibold leading-[30px] tracking-[-0.02em] text-fg">
+                      {fmtNum(card.usage)}
+                      <span className="ml-1 text-[12px] font-normal text-muted">{card.unit}</span>
+                    </p>
+                    <div className="flex items-center gap-2 text-[11px]">
+                      {totalDeltaPct != null && (
+                        <span
+                          className={`font-medium ${
+                            totalDeltaPct > 0.005 ? 'text-warning' : totalDeltaPct < -0.005 ? 'text-positive' : 'text-muted'
                           }`}
                         >
-                          <td className="px-3 py-2 font-medium text-fg">
-                            <span className="inline-flex items-center gap-2">
-                              <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: dotColor }} />
-                              <span>{row.name}</span>
-                            </span>
-                          </td>
-                          <td className="px-3 py-2 text-right font-semibold text-fg">{fmtNum(row.usage)}</td>
-                          <td className="px-3 py-2 text-right text-fg-2">{fmtPct(row.share)}</td>
-                          <td className="px-3 py-2 text-right text-muted">{fmtPct(row.prevShare)}</td>
-                          <td
-                            className={`px-3 py-2 text-right font-medium ${
-                              row.shareDiffPp == null
-                                ? 'text-muted'
-                                : Math.abs(row.shareDiffPp) < 0.05
-                                  ? 'text-muted'
-                                  : row.shareDiffPp > 0
-                                    ? 'text-warning'
-                                    : 'text-positive'
-                            }`}
-                          >
-                            {row.shareDiffPp != null
-                              ? `${row.shareDiffPp > 0 ? '+' : ''}${row.shareDiffPp.toFixed(1)} pp`
-                              : '—'}
-                          </td>
-                          <td
-                            className={`px-3 py-2 text-right ${
-                              row.usageDelta == null
-                                ? 'text-muted'
-                                : row.usageDelta > 0
-                                  ? 'text-negative'
-                                  : 'text-positive'
-                            }`}
-                          >
-                            {row.usageDelta != null
-                              ? `${row.usageDelta > 0 ? '+' : ''}${fmtNum(row.usageDelta)}`
-                              : '—'}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </section>
-
-          {/* Right 4 Cols: Category Drilldown Metering Sources + Versioned Reference Carbon Conversion */}
-          <aside className="space-y-4 lg:col-span-4">
-            {/* A. Clicked Category Metering Source Drilldown */}
-            <section aria-label="分类下钻与计量来源" className="arco-card p-5 text-[12px] tabular">
-              <div className="mb-3 flex items-center justify-between gap-2 border-b border-line pb-2.5">
-                <div>
-                  <span className="text-[11px] text-muted">分类计量来源下钻</span>
-                  <h3 className="text-[14px] font-medium text-fg">
-                    {selectedCatRow ? `${selectedCatRow.name}` : `${focusedLabel} · 全部关联计量点`}
-                  </h3>
-                </div>
-                {selectedCatId && (
-                  <button
-                    type="button"
-                    onClick={() => setSelectedCatId(null)}
-                    className="rounded-[2px] border border-line px-2 py-0.5 text-[11px] text-fg-2 hover:bg-fill-1"
-                  >
-                    查看全部
-                  </button>
-                )}
-              </div>
-
-              {selectedCatRow && (
-                <div className="mb-3 grid grid-cols-2 gap-2 rounded-[4px] bg-fill-1/60 p-2.5 text-[11px]">
-                  <div>
-                    <span className="text-muted">分类实测</span>
-                    <p className="mt-0.5 font-semibold text-fg">
-                      {fmtNum(selectedCatRow.usage)} {focusedCard.unit}
-                    </p>
+                          较前日 {totalDeltaPct > 0 ? '+' : ''}
+                          {fmtPct(totalDeltaPct)}
+                        </span>
+                      )}
+                      <span className="text-muted">{card.meterCount} 块表</span>
+                    </div>
                   </div>
-                  <div>
-                    <span className="text-muted">内部占比 / 覆盖率</span>
-                    <p className="mt-0.5 font-semibold text-fg">
-                      {fmtPct(selectedCatRow.share)} · {fmtPct(selectedCatRow.coverageRate)}
-                    </p>
-                  </div>
-                </div>
-              )}
 
-              {drilledSources.length === 0 ? (
-                <p className="rounded-[4px] bg-fill-1/50 px-3 py-3 text-[11px] text-muted">
-                  当前分项暂无匹配的已绑定计量点，请在配置中心核查分类权重绑定。
-                </p>
-              ) : (
-                <ul className="divide-y divide-line rounded-[4px] border border-line">
-                  {drilledSources.map(({ source, matched, totalWeightPpm }) => {
-                    const weightPct = matched ? matched.weightPpm / 10000 : totalWeightPpm / 10000;
-                    return (
-                      <li key={`${source.terminalId}-${source.itemCode}`} className="px-3 py-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="truncate font-medium text-fg">{source.terminalName}</span>
-                          <span className="shrink-0 font-semibold text-fg">
-                            {fmtNum(source.usage)} {source.unit}
-                          </span>
-                        </div>
-                        <div className="mt-1 flex flex-wrap items-center justify-between gap-1 text-[11px] text-muted">
-                          <span className="font-mono">{source.terminalId} · {source.sourceTable}</span>
-                          <span>
-                            {matched
-                              ? `分项权重 ${weightPct.toFixed(0)}%`
-                              : totalWeightPpm > 0
-                                ? `总绑定 ${weightPct.toFixed(0)}%`
-                                : '未绑定分项'}
-                            {' · '}有效 {source.valid}/{source.expected}
-                          </span>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </section>
-
-            {/* B. Explicit Versioned Reference Carbon Conversion (Never Mixes Physical Units) */}
-            {carbonSummary && (
-              <section aria-label="明确版本折碳参考构成" className="arco-card p-5 text-[12px] tabular">
-                <div className="mb-2.5 flex items-start justify-between gap-2 border-b border-line pb-2.5">
-                  <div>
-                    <h3 className="text-[14px] font-medium text-fg">折碳参考构成（统一换算口径）</h3>
-                    <p className="mt-0.5 font-mono text-[11px] text-muted">
-                      规则版本：{carbonSummary.factorVersion}
-                    </p>
-                  </div>
-                  <span className="shrink-0 rounded-[2px] bg-warning-soft px-1.5 py-0.5 text-[10px] font-medium text-warning">
-                    模拟参考值
-                  </span>
-                </div>
-
-                <div className="mb-3 flex items-baseline justify-between">
-                  <span className="text-[11px] text-muted">折算参考总碳排（不含水）</span>
-                  <span className="text-[18px] font-semibold text-fg">
-                    {fmtNum(carbonSummary.totalKgCO2e)} <span className="text-[11px] font-normal text-muted">kgCO₂e</span>
-                  </span>
-                </div>
-
-                <div className="space-y-2">
-                  {carbonIncludedCards
-                    .slice()
-                    .sort((a, b) => (b.carbon?.kgCO2e ?? 0) - (a.carbon?.kgCO2e ?? 0))
-                    .map((card, i) => {
-                      const kg = card.carbon?.kgCO2e ?? 0;
-                      const share = carbonSummary.totalKgCO2e ? kg / carbonSummary.totalKgCO2e : 0;
-                      return (
-                        <div key={`carb-${card.energy}`} className="space-y-1">
-                          <div className="flex items-center justify-between gap-2 text-[11px]">
-                            <span className="font-medium text-fg-2">
-                              {energyLabels[card.energy] ?? card.energy}
-                              <span className="ml-1.5 font-normal text-muted">
-                                ({card.carbon?.factor} {card.carbon?.factorUnit})
-                              </span>
-                            </span>
-                            <span className="font-semibold text-fg">
-                              {fmtNum(kg)} kg · {fmtPct(share)}
-                            </span>
-                          </div>
-                          <div className="h-[6px] w-full overflow-hidden rounded-[2px] bg-fill-2">
-                            <div
-                              className="h-full rounded-[2px]"
-                              style={{
-                                width: `${Math.max(2, share * 100)}%`,
-                                backgroundColor: CHART_PALETTE[i % (CHART_PALETTE.length - 1)],
-                              }}
-                            />
-                          </div>
-                        </div>
-                      );
-                    })}
-                </div>
-
-                {waterCard && (
-                  <div className="mt-3 flex items-center justify-between rounded-[2px] border border-dashed border-line bg-fill-1/50 px-2.5 py-1.5 text-[11px] text-fg-2">
-                    <span>水资源消费单列（不计入能源碳排）</span>
-                    <span className="font-semibold text-fg">
-                      {fmtNum(waterCard.usage)} {waterCard.unit}
-                    </span>
-                  </div>
-                )}
-
-                <p className="mt-2.5 text-[11px] leading-relaxed text-muted">
-                  {carbonSummary.disclaimer}
-                </p>
-              </section>
-            )}
-          </aside>
-        </div>
-      )}
-
-      {/* ── 3. All 5 Energies Compact Proportional Composition Strip (Native Unit Per Row) ── */}
-      <section aria-label="五能源分项构成速览" className="arco-card p-5">
-        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-          <div>
-            <h2 className="text-[15px] font-medium leading-[22px] text-fg">五能源分项结构矩阵（各能源独立 100% 内部占比）</h2>
-            <p className="mt-0.5 text-[12px] text-muted">
-              每行均以自身物理单位为 100% 基准，点击任意能源切换上方深度结构分析
-            </p>
-          </div>
-        </div>
-        <div className="divide-y divide-line tabular">
-          {energies.map((card) => {
-            const cats = [...(card.categories ?? [])].sort((a, b) => (b.usage ?? 0) - (a.usage ?? 0));
-            const isSel = card.energy === focusedCard?.energy;
-            return (
-              <button
-                key={`mat-${card.energy}`}
-                type="button"
-                onClick={() => setFocusEnergy(card.energy)}
-                className={`grid w-full items-center gap-3 px-2 py-3 text-left transition-colors md:grid-cols-[150px_1fr_280px] ${
-                  isSel ? 'bg-primary-soft/30' : 'hover:bg-fill-1/60'
-                }`}
-              >
-                <div>
-                  <div className="flex items-center gap-1.5 text-[13px] font-medium text-fg">
-                    <span>{energyLabels[card.energy] ?? card.energy}</span>
-                    <span className="text-[11px] font-normal text-muted">({card.unit})</span>
-                  </div>
-                  <div className="mt-0.5 text-[12px] font-semibold text-fg">
-                    {fmtNum(card.usage)} <span className="text-[11px] font-normal text-muted">{card.unit}</span>
-                  </div>
-                </div>
-
-                {/* Native-unit 100% proportional stacked bar */}
-                <div className="space-y-1">
-                  <div className="flex h-[12px] w-full overflow-hidden rounded-[2px] bg-fill-2">
+                  {/* Native-Unit 100% Proportional Stacked Bar */}
+                  <div className="mt-2.5 flex h-[10px] w-full overflow-hidden rounded-[2px] bg-fill-2">
                     {cats.map((c, ci) => (
                       <div
                         key={c.id}
                         title={`${c.name}: ${fmtNum(c.usage)} ${card.unit} (${fmtPct(c.share)})`}
                         style={{
-                          width: `${Math.max(1, (c.share ?? 0) * 100)}%`,
+                          width: `${Math.max(2, (c.share ?? 0) * 100)}%`,
                           backgroundColor: CHART_PALETTE[ci % (CHART_PALETTE.length - 1)],
                         }}
                       />
                     ))}
-                    {card.unclassifiedUsage && card.unclassifiedUsage > 0 && card.usage ? (
+                    {hasUnclass && card.usage ? (
                       <div
                         title={`未分项: ${fmtNum(card.unclassifiedUsage)} ${card.unit}`}
                         style={{
-                          width: `${Math.max(1, (card.unclassifiedUsage / card.usage) * 100)}%`,
+                          width: `${Math.max(2, ((card.unclassifiedUsage ?? 0) / card.usage) * 100)}%`,
                           backgroundColor: '#C9CDD4',
                         }}
                       />
                     ) : null}
                   </div>
-                  <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted">
-                    {cats.slice(0, 4).map((c, ci) => (
-                      <span key={c.id} className="inline-flex items-center gap-1">
-                        <span
-                          className="size-1.5 rounded-full"
-                          style={{ backgroundColor: CHART_PALETTE[ci % (CHART_PALETTE.length - 1)] }}
-                        />
-                        <span>{c.name}</span>
-                        <span className="text-fg-2">{fmtPct(c.share)}</span>
-                      </span>
-                    ))}
-                  </div>
                 </div>
 
-                <div className="flex items-center justify-end gap-3 text-[11px] text-muted">
-                  <span>{card.meterCount} 块表</span>
-                  <span>覆盖 {fmtPct(card.coverage.rate)}</span>
-                  <span className="font-medium text-primary">{isSel ? '当前分析' : '下钻分析'}</span>
+                {/* Clickable Category Share & D-1 Δpp Rows */}
+                <div className="divide-y divide-line px-2 py-1 text-[12px]">
+                  {cats.map((c, ci) => {
+                    const prevC = prevCatMap.get(c.id);
+                    const diffPp = c.share != null && prevC?.share != null ? (c.share - prevC.share) * 100 : null;
+                    const rowSel = isFocus && selectedCatId === c.id;
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => {
+                          if (!isFocus) {
+                            setFocusEnergy(card.energy);
+                            setSelectedCatId(c.id);
+                          } else {
+                            setSelectedCatId((cur) => (cur === c.id ? null : c.id));
+                          }
+                        }}
+                        className={`flex w-full items-center justify-between gap-2 rounded-[2px] px-2 py-2 text-left transition-colors ${
+                          rowSel ? 'bg-primary-soft/55' : 'hover:bg-fill-1/70'
+                        }`}
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span
+                            className="size-2 shrink-0 rounded-full"
+                            style={{ backgroundColor: CHART_PALETTE[ci % (CHART_PALETTE.length - 1)] }}
+                          />
+                          <span className="truncate font-medium text-fg">{c.name}</span>
+                        </span>
+                        <span className="flex shrink-0 items-center gap-2.5 text-[11px]">
+                          <span className="font-semibold text-fg">{fmtNum(c.usage)}</span>
+                          <span className="w-11 text-right text-fg-2">{fmtPct(c.share)}</span>
+                          <span
+                            className={`w-14 text-right font-medium ${
+                              diffPp == null || Math.abs(diffPp) < 0.05
+                                ? 'text-muted'
+                                : diffPp > 0
+                                  ? 'text-warning'
+                                  : 'text-positive'
+                            }`}
+                          >
+                            {diffPp != null ? `${diffPp > 0 ? '+' : ''}${diffPp.toFixed(1)}pp` : '—'}
+                          </span>
+                        </span>
+                      </button>
+                    );
+                  })}
+
+                  {hasUnclass && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFocusEnergy(card.energy);
+                        setSelectedCatId((cur) => (isFocus && cur === '__unclassified__' ? null : '__unclassified__'));
+                      }}
+                      className={`flex w-full items-center justify-between gap-2 rounded-[2px] px-2 py-2 text-left transition-colors ${
+                        isFocus && selectedCatId === '__unclassified__' ? 'bg-primary-soft/55' : 'hover:bg-fill-1/70'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2 text-muted">
+                        <span className="size-2 shrink-0 rounded-full bg-[#C9CDD4]" />
+                        <span>未分项（待分配）</span>
+                      </span>
+                      <span className="text-[11px] font-medium text-fg-2">
+                        {fmtNum(card.unclassifiedUsage)} {card.unit}
+                      </span>
+                    </button>
+                  )}
                 </div>
+              </div>
+
+              <div className="flex items-center justify-between border-t border-line bg-fill-1/30 px-4 py-1.5 text-[11px] text-muted">
+                <span>点击分项行下钻对应计量点</span>
+                <span className={isFocus ? 'font-medium text-primary' : ''}>
+                  {isFocus ? '当前溯源能源' : '点击切换溯源'}
+                </span>
+              </div>
+            </section>
+          );
+        })}
+
+        {/* Slot #6 in the 3×2 Portfolio Matrix: Versioned Reference Carbon Conversion (Never Mixes Physical Units) */}
+        {carbonSummary && (
+          <section
+            aria-label="明确版本折碳参考构成"
+            className="arco-card flex flex-col justify-between p-4 text-[12px] tabular"
+          >
+            <div>
+              <div className="mb-2.5 flex items-start justify-between gap-2 border-b border-line pb-2.5">
+                <div>
+                  <h2 className="text-[14px] font-semibold text-fg">折碳参考构成（统一换算口径）</h2>
+                  <p className="mt-0.5 font-mono text-[11px] text-muted">
+                    规则版本：{carbonSummary.factorVersion}
+                  </p>
+                </div>
+                <span className="shrink-0 rounded-[2px] bg-warning-soft px-1.5 py-0.5 text-[10px] font-medium text-warning">
+                  模拟参考值
+                </span>
+              </div>
+
+              <div className="mb-3 flex items-baseline justify-between">
+                <span className="text-[11px] text-muted">折算参考总碳排（不含水）</span>
+                <span className="text-[22px] font-semibold text-fg">
+                  {fmtNum(carbonSummary.totalKgCO2e)}{' '}
+                  <span className="text-[11px] font-normal text-muted">kgCO₂e</span>
+                </span>
+              </div>
+
+              <div className="space-y-2">
+                {carbonIncludedCards
+                  .slice()
+                  .sort((a, b) => (b.carbon?.kgCO2e ?? 0) - (a.carbon?.kgCO2e ?? 0))
+                  .map((card, i) => {
+                    const kg = card.carbon?.kgCO2e ?? 0;
+                    const share = carbonSummary.totalKgCO2e ? kg / carbonSummary.totalKgCO2e : 0;
+                    return (
+                      <div key={`carb-${card.energy}`} className="space-y-1">
+                        <div className="flex items-center justify-between gap-2 text-[11px]">
+                          <span className="font-medium text-fg-2">
+                            {energyLabels[card.energy] ?? card.energy}
+                            <span className="ml-1 font-normal text-muted">
+                              ({card.carbon?.factor} {card.carbon?.factorUnit})
+                            </span>
+                          </span>
+                          <span className="font-semibold text-fg">
+                            {fmtNum(kg)} kg · {fmtPct(share)}
+                          </span>
+                        </div>
+                        <div className="h-[6px] w-full overflow-hidden rounded-[2px] bg-fill-2">
+                          <div
+                            className="h-full rounded-[2px]"
+                            style={{
+                              width: `${Math.max(2, share * 100)}%`,
+                              backgroundColor: CHART_PALETTE[i % (CHART_PALETTE.length - 1)],
+                            }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+
+              {waterCard && (
+                <div className="mt-3 flex items-center justify-between rounded-[2px] border border-dashed border-line bg-fill-1/50 px-2.5 py-1.5 text-[11px] text-fg-2">
+                  <span>水资源消费单列（不计入能源碳排）</span>
+                  <span className="font-semibold text-fg">
+                    {fmtNum(waterCard.usage)} {waterCard.unit}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <p className="mt-2.5 border-t border-line pt-2 text-[11px] leading-relaxed text-muted">
+              {carbonSummary.disclaimer}
+            </p>
+          </section>
+        )}
+      </div>
+
+      {/* ── 3. Inline Focused Energy / Category Metering Source Evidence Bar ── */}
+      {focusedCard && (
+        <section aria-label="分类下钻与计量来源" className="arco-card p-5 text-[12px] tabular">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span className="rounded-[2px] bg-primary-soft px-2 py-0.5 text-[11px] font-medium text-primary">
+                {focusedLabel}计量溯源
+              </span>
+              <h2 className="text-[14px] font-semibold text-fg">
+                {selectedCatRow ? `${selectedCatRow.name}` : `全部已关联计量点（${drilledSources.length} 块）`}
+              </h2>
+              {selectedCatRow && (
+                <span className="text-[12px] text-muted">
+                  分项实测 <strong className="text-fg">{fmtNum(selectedCatRow.usage)} {focusedCard.unit}</strong>
+                  {' · '}占 {focusedLabel} {fmtPct(selectedCatRow.share)}
+                  {selectedCatRow.shareDiffPp != null
+                    ? ` · 较前日 ${selectedCatRow.shareDiffPp > 0 ? '+' : ''}${selectedCatRow.shareDiffPp.toFixed(1)} pp`
+                    : ''}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {selectedCatId && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedCatId(null)}
+                  className="rounded-[2px] border border-line px-2.5 py-1 text-[11px] text-fg-2 hover:bg-fill-1"
+                >
+                  查看{focusedLabel}全部表计
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => onNavigateClassification(focusedCard.energy)}
+                className="inline-flex items-center gap-1 rounded-[2px] border border-primary/35 bg-primary-soft/50 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary-soft"
+              >
+                前往 F06 深度趋势分析
+                <ArrowRight className="h-3 w-3" aria-hidden="true" />
               </button>
-            );
-          })}
-        </div>
-      </section>
+            </div>
+          </div>
+
+          {drilledSources.length === 0 ? (
+            <p className="rounded-[4px] bg-fill-1/50 px-3 py-3 text-[11px] text-muted">
+              当前分项暂无匹配的已绑定计量点，请在配置中心核查分类权重绑定。
+            </p>
+          ) : (
+            <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {drilledSources.map(({ source, matched, totalWeightPpm }) => {
+                const weightPct = matched ? matched.weightPpm / 10000 : totalWeightPpm / 10000;
+                return (
+                  <div
+                    key={`${source.terminalId}-${source.itemCode}`}
+                    className="rounded-[4px] border border-line bg-fill-1/30 px-3 py-2.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate font-medium text-fg">{source.terminalName}</span>
+                      <span className="shrink-0 font-semibold text-fg">
+                        {fmtNum(source.usage)} {source.unit}
+                      </span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center justify-between gap-1 text-[11px] text-muted">
+                      <span className="font-mono">{source.terminalId} · {source.sourceTable}</span>
+                      <span>
+                        {matched
+                          ? `权重 ${weightPct.toFixed(0)}%`
+                          : totalWeightPpm > 0
+                            ? `总绑定 ${weightPct.toFixed(0)}%`
+                            : '未绑定'}
+                        {' · '}有效 {source.valid}/{source.expected}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      )}
 
       <SourceTraceTable sources={allSources} />
     </div>
@@ -2421,12 +2485,6 @@ function LiveObjectsOverviewView({
   }, [selectedObj, bindingMap, catNameMap]);
 
   const topSpace = [...spaceRows].sort((a, b) => (b.usage ?? 0) - (a.usage ?? 0))[0] ?? null;
-  const topCat = [...(classificationExtra?.categories ?? [])].sort((a, b) => (b.usage ?? 0) - (a.usage ?? 0))[0] ?? null;
-  const maxSpaceVal = Math.max(
-    ...spaceHierarchy.map((g) => g.subtreeUsage ?? g.row.usage ?? 0),
-    data.buildingTotal ?? 0,
-    1,
-  );
 
   const buildingSlices = [
     ...(classificationExtra?.categories ?? []).map((c) => ({ id: c.id, name: c.name, usage: c.usage, share: c.share })),
@@ -2443,305 +2501,173 @@ function LiveObjectsOverviewView({
       : []),
   ];
 
+  const spatialMapNodes = useMemo(
+    () =>
+      spaceHierarchy.map(({ row, profile, children, subtreeUsage }) => ({
+        id: row.id,
+        name: row.name,
+        usage: row.usage,
+        areaSqm: profile?.areaSqm ?? null,
+        coverageRate: row.coverage.rate,
+        comparable: row.status === 'comparable' && (row.coverage.rate ?? 0) >= 0.999,
+        meterCount: row.sources?.length ?? 0,
+        subtreeUsage,
+        children: children.map(({ row: c, profile: cp }) => ({
+          id: c.id,
+          name: c.name,
+          usage: c.usage,
+          areaSqm: cp?.areaSqm ?? null,
+          coverageRate: c.coverage.rate,
+          comparable: c.status === 'comparable' && (c.coverage.rate ?? 0) >= 0.999,
+          meterCount: c.sources?.length ?? 0,
+        })),
+      })),
+    [spaceHierarchy],
+  );
+
   const allSources = spaceRows.flatMap((r) => r.sources ?? []);
 
   return (
     <div className="space-y-4">
-      {/* ── 1. Unified Reconciliation & High-Consumer Summary Strip ── */}
-      <section aria-label="建筑分区分项汇总核对" className="arco-card overflow-hidden">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-fill-1/50 px-5 py-2 text-[12px] tabular">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium text-fg">
-              {data.buildingName} · {energyLabels[data.energy] ?? data.energy}空间与分项联动概览
+      {/* ── 1. Compact Spatial Reconciliation Header Bar (Zero 4-Box KPI Repetition) ── */}
+      <div className="arco-card flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-[12px] tabular">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="font-semibold text-fg">
+            {data.buildingName} · {energyLabels[data.energy] ?? data.energy}
+          </span>
+          <span className="text-muted">自然日 {fmtShanghaiDate(data.from)}</span>
+          <span className="inline-flex items-baseline gap-1 rounded-[2px] bg-fill-1 px-2 py-0.5">
+            <span className="text-[11px] text-muted">建筑总量</span>
+            <strong className="text-[13px] font-semibold text-fg">{fmtNum(data.buildingTotal)}</strong>
+            <span className="text-[11px] text-muted">{data.unit}</span>
+          </span>
+          {topSpace && (
+            <span className="text-[11px] text-fg-2">
+              最高耗能区：<strong className="font-medium text-fg">{topSpace.name}</strong> ({fmtNum(topSpace.usage)} {data.unit})
             </span>
-            <span className="text-muted">自然日 {fmtShanghaiDate(data.from)} · {data.timezone}</span>
-          </div>
-          <span className="text-[11px] text-muted">
-            父级与子空间均按独立直属计量统计，严禁父子表重复累计
+          )}
+          <span
+            className={`rounded-[2px] px-1.5 py-0.5 text-[10px] font-medium ${
+              !hasUnassignedResidual && lowCovSpaces.length === 0
+                ? 'bg-positive-soft text-positive'
+                : 'bg-warning-soft text-warning'
+            }`}
+          >
+            {!hasUnassignedResidual && lowCovSpaces.length === 0
+              ? `直属归属闭合 (${fmtNum(directSpaceSum)} ${data.unit} · 零重复累计)`
+              : hasUnassignedResidual
+                ? `未归属差额 ${fmtNum(unassignedSpaceDiff)} ${data.unit}`
+                : `${lowCovSpaces.length} 个空间存在低覆盖/不可比`}
           </span>
         </div>
 
-        <div className="grid divide-y divide-line sm:grid-cols-2 lg:grid-cols-4 lg:divide-y-0 lg:divide-x tabular">
-          <div className="p-4">
-            <p className="text-[12px] font-medium text-fg-2">建筑{energyLabels[data.energy] ?? data.energy}总量</p>
-            <p className="mt-1.5 text-[24px] font-semibold leading-[30px] tracking-[-0.02em] text-fg">
-              {fmtNum(data.buildingTotal)}
-              <span className="ml-1 text-[12px] font-normal text-muted">{data.unit}</span>
-            </p>
-            <p className="mt-1 text-[11px] text-muted">
-              下辖 {spaceRows.length} 个空间 · 本建筑 {localOrgRows.length} 个关联组织
-            </p>
-          </div>
-
-          <div className="p-4">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">最高耗能区域</span>
-              {topSpace && data.buildingTotal ? (
-                <span className="rounded-[2px] bg-warning-soft px-1.5 py-0 text-[10px] font-medium text-warning">
-                  占 {fmtPct((topSpace.usage ?? 0) / data.buildingTotal)}
-                </span>
-              ) : null}
-            </div>
-            <p className="mt-1.5 truncate text-[16px] font-semibold leading-[30px] text-fg">
-              {topSpace ? topSpace.name : '—'}
-            </p>
-            <p className="mt-1 text-[11px] text-muted">
-              {topSpace ? `${fmtNum(topSpace.usage)} ${data.unit} · 覆盖 ${fmtPct(topSpace.coverage.rate)}` : '暂无空间计量'}
-            </p>
-          </div>
-
-          <div className="p-4">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">主力用能分项</span>
-              {topCat?.share != null && (
-                <span className="rounded-[2px] bg-primary-soft px-1.5 py-0 text-[10px] font-medium text-primary">
-                  占 {fmtPct(topCat.share)}
-                </span>
-              )}
-            </div>
-            <p className="mt-1.5 truncate text-[16px] font-semibold leading-[30px] text-fg">
-              {topCat ? topCat.name : '读取中…'}
-            </p>
-            <p className="mt-1 text-[11px] text-muted">
-              {topCat ? `${fmtNum(topCat.usage)} ${data.unit} · 共 ${classificationExtra?.categories?.length ?? 0} 个分项` : '同步拉取分类构成'}
-            </p>
-          </div>
-
-          <div className="bg-fill-1/35 p-4">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">空间归属与覆盖核对</span>
-              <span
-                className={`rounded-[2px] px-1.5 py-0 text-[10px] font-medium ${
-                  !hasUnassignedResidual && lowCovSpaces.length === 0
-                    ? 'bg-positive-soft text-positive'
-                    : 'bg-warning-soft text-warning'
-                }`}
-              >
-                {!hasUnassignedResidual && lowCovSpaces.length === 0 ? '归属闭合' : '存在待核查项'}
-              </span>
-            </div>
-            <p className="mt-1.5 text-[20px] font-semibold leading-[30px] text-fg">
-              {fmtNum(directSpaceSum)}
-              <span className="ml-1 text-[11px] font-normal text-muted">{data.unit}</span>
-            </p>
-            <p className="mt-1 text-[11px] text-muted">
-              {hasUnassignedResidual
-                ? `未归属差额 ${fmtNum(unassignedSpaceDiff)} ${data.unit}`
-                : lowCovSpaces.length > 0
-                  ? `${lowCovSpaces.length} 个空间存在低覆盖/不可比`
-                  : '各直属空间合计与建筑总量一致（零重复累计）'}
-            </p>
-          </div>
+        <div className="inline-flex rounded-[2px] border border-line bg-fill-1 p-0.5 text-[12px]">
+          {(
+            [
+              { id: 'space', label: `空间平面层级 (${spaceRows.length})` },
+              { id: 'org', label: `关联组织 (${localOrgRows.length}/${orgRows.length})` },
+              { id: 'building', label: `园区建筑 (${buildingDimExtra?.rows?.length ?? 3})` },
+            ] as const
+          ).map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              data-objects-tab={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`rounded-[2px] px-2.5 py-1 transition-colors ${
+                activeTab === tab.id ? 'bg-surface font-medium text-primary shadow-xs' : 'text-fg-2 hover:text-fg'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
-      </section>
+      </div>
 
-      {/* ── 2. Primary Linked Stage: Spatial Hierarchy / Org / Building (8 cols) + Linked Sub-Item & Meter Breakdown (4 cols) ── */}
-      <div className="grid items-start gap-4 lg:grid-cols-12">
-        <section className="arco-card p-5 lg:col-span-8">
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <h2 className="text-[15px] font-medium leading-[22px] text-fg">
-                {activeTab === 'space'
-                  ? '建筑空间层级分布（区分父级汇总与子级直属用量）'
-                  : activeTab === 'org'
-                    ? '关联组织能耗分布与同口径排名'
-                    : '园区建筑横向能耗分布对比'}
-              </h2>
-              <p className="mt-0.5 text-[12px] text-muted">
-                {activeTab === 'space'
-                  ? '点击任意父空间或子空间，右侧同步联动展示该区域对应的用能分项构成与计量归属'
-                  : activeTab === 'org'
-                    ? '优先区分本建筑关联组织与园区同口径参考组织；点击组织查看对应分项构成'
-                    : '点击任意建筑直接切换当前分析对象'}
-              </p>
-            </div>
-            <div className="inline-flex rounded-[2px] border border-line bg-fill-1 p-0.5 text-[12px]">
-              {(
-                [
-                  { id: 'space', label: `空间层级 (${spaceRows.length})` },
-                  { id: 'org', label: `关联组织 (${localOrgRows.length}/${orgRows.length})` },
-                  { id: 'building', label: `园区建筑 (${buildingDimExtra?.rows?.length ?? 3})` },
-                ] as const
-              ).map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  data-objects-tab={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`rounded-[2px] px-2.5 py-1 transition-colors ${
-                    activeTab === tab.id ? 'bg-surface font-medium text-primary shadow-xs' : 'text-fg-2 hover:text-fg'
-                  }`}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
+      {/* ── 2. Full-Width 2D Nested Spatial Blueprint Canvas (Distinct Spatial Hierarchy Archetype) ── */}
+      <section className="arco-card p-5">
+        <div className="mb-3.5 flex flex-wrap items-baseline justify-between gap-2">
+          <div>
+            <h2 className="text-[15px] font-medium leading-[22px] text-fg">
+              {activeTab === 'space'
+                ? '建筑空间嵌套平面图谱（父空间包裹下级子空间 · 严格区分直属表计）'
+                : activeTab === 'org'
+                  ? '关联组织能耗分布与同口径参考'
+                  : '园区建筑横向能耗分布对比'}
+            </h2>
+            <p className="mt-0.5 text-[12px] text-muted">
+              {activeTab === 'space'
+                ? '点击任意父空间或嵌套子空间区块，下方同步展开该区域的分项用能构成与直属表计清单'
+                : activeTab === 'org'
+                  ? '左侧为本建筑关联组织，右侧为园区其他建筑同口径参照（不计入本建筑汇总）'
+                  : '点击任意建筑直接切换当前分析对象'}
+            </p>
           </div>
-
-          {activeTab === 'space' && (
-            <div className="space-y-2.5 tabular">
-              {spaceHierarchy.map(({ row, profile, children, subtreeUsage }) => {
-                const isSel = selectedObjId === row.id;
-                const hasChildren = children.length > 0;
-                const directPct = data.buildingTotal ? (row.usage ?? 0) / data.buildingTotal : null;
-                const subtreePct = data.buildingTotal && subtreeUsage != null ? subtreeUsage / data.buildingTotal : null;
-                const barWidth = Math.max(3, ((row.usage ?? 0) / maxSpaceVal) * 100);
-                const covOk = (row.coverage.rate ?? 0) >= 0.999 && row.status === 'comparable';
-
-                return (
-                  <div key={row.id} className="overflow-hidden rounded-[4px] border border-line bg-surface">
-                    {/* Parent / Top-Level Space Row */}
-                    <button
-                      type="button"
-                      data-space-node={row.id}
-                      onClick={() => setSelectedObjId((cur) => (cur === row.id ? null : row.id))}
-                      className={`w-full px-4 py-3 text-left transition-colors ${
-                        isSel ? 'bg-primary-soft/45' : 'hover:bg-fill-1/60'
-                      }`}
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex min-w-0 flex-wrap items-center gap-2">
-                          <span className="inline-flex h-5 min-w-[26px] items-center justify-center rounded-[2px] bg-fill-2 px-1.5 text-[11px] font-semibold text-fg-2">
-                            {row.rank != null ? `#${row.rank}` : '—'}
-                          </span>
-                          <span className="text-[13px] font-medium text-fg">{row.name}</span>
-                          <span className="rounded-[2px] bg-fill-2 px-1.5 py-0 text-[10px] text-fg-2">
-                            {hasChildren ? '父级直属计量' : '独立空间'}
-                          </span>
-                          {profile?.areaSqm && (
-                            <span className="text-[11px] text-muted">{fmtNum(profile.areaSqm)} m²</span>
-                          )}
-                          {!covOk && (
-                            <span className="rounded-[2px] bg-warning-soft px-1.5 py-0 text-[10px] text-warning">
-                              {row.reason || statusLabels[row.status] || `覆盖 ${fmtPct(row.coverage.rate)}`}
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-right">
-                          <span className="text-[14px] font-semibold text-fg">
-                            {fmtNum(row.usage)} <span className="text-[11px] font-normal text-muted">{data.unit}</span>
-                          </span>
-                          {directPct != null && (
-                            <span className="ml-2 text-[11px] text-muted">占建筑 {fmtPct(directPct)}</span>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="mt-2 flex items-center gap-3">
-                        <div className="h-[8px] flex-1 overflow-hidden rounded-[2px] bg-fill-2">
-                          <div
-                            className="h-full rounded-[2px]"
-                            style={{
-                              width: `${barWidth}%`,
-                              backgroundColor: isSel ? '#165DFF' : covOk ? '#3491FA' : '#FF7D00',
-                            }}
-                          />
-                        </div>
-                        <span className="w-24 text-right text-[11px] text-muted">
-                          {row.sources?.length ?? 0} 块表 · {fmtPct(row.coverage.rate)}
-                        </span>
-                      </div>
-
-                      {hasChildren && subtreeUsage != null && (
-                        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-[2px] bg-fill-1/70 px-2.5 py-1 text-[11px] text-fg-2">
-                          <span>
-                            含 {children.length} 个下级子空间合计参考：<strong className="font-semibold text-fg">{fmtNum(subtreeUsage)} {data.unit}</strong>
-                            {subtreePct != null ? `（占建筑 ${fmtPct(subtreePct)}）` : ''}
-                          </span>
-                          <span className="text-muted">建筑总计按直属节点汇总，不重复累加</span>
-                        </div>
-                      )}
-                    </button>
-
-                    {/* Indented Child Spaces (Strict Parent/Child Separation) */}
-                    {hasChildren && (
-                      <div className="divide-y divide-line border-t border-line bg-fill-1/25">
-                        {children.map(({ row: child, profile: cProf }) => {
-                          const childSel = selectedObjId === child.id;
-                          const cPct = data.buildingTotal ? (child.usage ?? 0) / data.buildingTotal : null;
-                          const cBarW = Math.max(3, ((child.usage ?? 0) / maxSpaceVal) * 100);
-                          const cCovOk = (child.coverage.rate ?? 0) >= 0.999 && child.status === 'comparable';
-                          return (
-                            <button
-                              key={child.id}
-                              type="button"
-                              data-space-node={child.id}
-                              onClick={() => setSelectedObjId((cur) => (cur === child.id ? null : child.id))}
-                              className={`w-full py-2.5 pl-9 pr-4 text-left transition-colors ${
-                                childSel ? 'bg-primary-soft/45' : 'hover:bg-fill-1/70'
-                              }`}
-                            >
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <span className="text-muted">└</span>
-                                  <span className="text-[12px] font-medium text-fg">{child.name}</span>
-                                  <span className="rounded-[2px] border border-line bg-surface px-1.5 py-0 text-[10px] text-muted">
-                                    子空间独立计量
-                                  </span>
-                                  {cProf?.areaSqm && (
-                                    <span className="text-[11px] text-muted">{fmtNum(cProf.areaSqm)} m²</span>
-                                  )}
-                                  {!cCovOk && (
-                                    <span className="rounded-[2px] bg-warning-soft px-1.5 py-0 text-[10px] text-warning">
-                                      {child.reason || statusLabels[child.status]}
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="text-right text-[12px]">
-                                  <span className="font-semibold text-fg">
-                                    {fmtNum(child.usage)} <span className="text-[11px] font-normal text-muted">{data.unit}</span>
-                                  </span>
-                                  {cPct != null && (
-                                    <span className="ml-2 text-[11px] text-muted">占建筑 {fmtPct(cPct)}</span>
-                                  )}
-                                </div>
-                              </div>
-                              <div className="mt-1.5 flex items-center gap-3 pl-4">
-                                <div className="h-[6px] flex-1 overflow-hidden rounded-[2px] bg-fill-2">
-                                  <div
-                                    className="h-full rounded-[2px]"
-                                    style={{
-                                      width: `${cBarW}%`,
-                                      backgroundColor: childSel ? '#165DFF' : '#0FC6C2',
-                                    }}
-                                  />
-                                </div>
-                                <span className="w-24 text-right text-[11px] text-muted">
-                                  {child.sources?.length ?? 0} 块表 · {fmtPct(child.coverage.rate)}
-                                </span>
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-
-              {hasUnassignedResidual && (
-                <div className="flex items-center justify-between rounded-[4px] border border-dashed border-warning/50 bg-warning-soft/40 px-4 py-2.5 text-[12px]">
-                  <span className="font-medium text-warning">未归属空间 / 待核查差额（建筑总量 − 空间直属合计）</span>
-                  <span className="font-semibold text-warning">
-                    {fmtNum(unassignedSpaceDiff)} {data.unit}
-                  </span>
-                </div>
-              )}
-            </div>
+          {selectedObj && (
+            <button
+              type="button"
+              onClick={() => setSelectedObjId(null)}
+              className="rounded-[2px] border border-line px-2.5 py-1 text-[11px] text-fg-2 hover:bg-fill-1"
+            >
+              清除选中 · 返回整栋分项
+            </button>
           )}
+        </div>
 
-          {activeTab === 'org' && (
-            <div className="space-y-4">
-              <div>
+        {activeTab === 'space' && (
+          <div className="space-y-3">
+            <SpatialHierarchyMap
+              nodes={spatialMapNodes}
+              buildingTotal={data.buildingTotal}
+              unit={data.unit}
+              selectedId={selectedObjId}
+              onSelect={(id) => setSelectedObjId((cur) => (cur === id ? null : id))}
+            />
+
+            {hasUnassignedResidual && (
+              <div className="flex items-center justify-between rounded-[4px] border border-dashed border-warning/50 bg-warning-soft/40 px-4 py-2.5 text-[12px] tabular">
+                <span className="font-medium text-warning">未归属空间 / 待核查差额（建筑总量 − 空间直属合计）</span>
+                <span className="font-semibold text-warning">
+                  {fmtNum(unassignedSpaceDiff)} {data.unit}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'org' && (
+          <div className="grid gap-5 lg:grid-cols-2">
+            <div>
+              <div className="mb-2 flex items-center justify-between text-[12px]">
+                <span className="font-medium text-fg">本建筑关联组织（{data.buildingName}）</span>
+                <span className="text-[11px] text-muted">点击条目下方查看分项构成</span>
+              </div>
+              <HorizontalRankingChart
+                unit={data.unit}
+                selectedId={selectedObjId}
+                onSelect={(id) => setSelectedObjId((cur) => (cur === id ? null : id))}
+                items={(localOrgRows.length > 0 ? localOrgRows : orgRows).map((r) => ({
+                  id: r.id,
+                  name: r.name,
+                  usage: r.usage,
+                  rank: r.rank,
+                  coverageRate: r.coverage.rate,
+                  statusText: r.reason || (statusLabels[r.status] ?? r.status),
+                }))}
+              />
+            </div>
+
+            {peerOrgRows.length > 0 && (
+              <div className="border-t border-line pt-4 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-5">
                 <div className="mb-2 flex items-center justify-between text-[12px]">
-                  <span className="font-medium text-fg">本建筑关联组织（{data.buildingName}）</span>
-                  <span className="text-[11px] text-muted">点击条目右侧同步查看分项构成</span>
+                  <span className="font-medium text-fg-2">园区其他建筑同口径组织参考</span>
+                  <span className="text-[11px] text-muted">跨建筑参照，不计入本建筑汇总</span>
                 </div>
                 <HorizontalRankingChart
                   unit={data.unit}
                   selectedId={selectedObjId}
                   onSelect={(id) => setSelectedObjId((cur) => (cur === id ? null : id))}
-                  items={(localOrgRows.length > 0 ? localOrgRows : orgRows).map((r) => ({
+                  items={peerOrgRows.map((r) => ({
                     id: r.id,
                     name: r.name,
                     usage: r.usage,
@@ -2751,126 +2677,74 @@ function LiveObjectsOverviewView({
                   }))}
                 />
               </div>
-
-              {peerOrgRows.length > 0 && (
-                <div className="border-t border-line pt-3.5">
-                  <div className="mb-2 flex items-center justify-between text-[12px]">
-                    <span className="font-medium text-fg-2">园区其他建筑同口径组织参考</span>
-                    <span className="text-[11px] text-muted">跨建筑同能源参照，不计入本建筑汇总</span>
-                  </div>
-                  <HorizontalRankingChart
-                    unit={data.unit}
-                    selectedId={selectedObjId}
-                    onSelect={(id) => setSelectedObjId((cur) => (cur === id ? null : id))}
-                    items={peerOrgRows.map((r) => ({
-                      id: r.id,
-                      name: r.name,
-                      usage: r.usage,
-                      rank: r.rank,
-                      coverageRate: r.coverage.rate,
-                      statusText: r.reason || (statusLabels[r.status] ?? r.status),
-                    }))}
-                  />
-                </div>
-              )}
-            </div>
-          )}
-
-          {activeTab === 'building' && (
-            <HorizontalRankingChart
-              unit={buildingDimExtra?.unit ?? data.unit}
-              selectedId={data.buildingId}
-              onSelect={(bid) => onSelectBuilding(bid)}
-              items={(buildingDimExtra?.rows ?? []).map((r) => ({
-                id: r.id,
-                name: r.name,
-                usage: r.usage,
-                rank: r.rank,
-                coverageRate: r.coverage.rate,
-                statusText: r.reason || (statusLabels[r.status] ?? r.status),
-              }))}
-            />
-          )}
-        </section>
-
-        {/* Right 4 Cols: Linked Sub-Item Breakdown & Meter Attribution Inspector */}
-        <aside aria-label="联动分项构成与计量归属" className="arco-card space-y-4 p-5 text-[12px] tabular lg:col-span-4">
-          <div className="flex items-start justify-between gap-2 border-b border-line pb-3">
-            <div>
-              <span className="text-[11px] text-muted">
-                {selectedObj ? '选中对象联动分项构成' : '整栋建筑用能分项构成'}
-              </span>
-              <h3 className="mt-0.5 text-[15px] font-medium text-fg">
-                {selectedObj ? selectedObj.name : `${data.buildingName}（全部空间）`}
-              </h3>
-            </div>
-            {selectedObj && (
-              <button
-                type="button"
-                onClick={() => setSelectedObjId(null)}
-                className="shrink-0 rounded-[2px] border border-line px-2 py-0.5 text-[11px] text-fg-2 hover:bg-fill-1"
-              >
-                返回整栋
-              </button>
             )}
           </div>
+        )}
 
-          {selectedObj && selectedObjBreakdown ? (
-            <>
-              <div className="grid grid-cols-2 gap-2 rounded-[4px] bg-fill-1/60 p-3 text-[11px]">
-                <div>
-                  <span className="text-muted">直属实测用量</span>
-                  <p className="mt-0.5 text-[15px] font-semibold text-fg">
-                    {fmtNum(selectedObj.usage)} {data.unit}
-                  </p>
-                </div>
-                <div>
-                  <span className="text-muted">覆盖率 / 状态</span>
-                  <p className="mt-0.5 text-[13px] font-medium text-fg">
-                    {fmtPct(selectedObj.coverage.rate)} · {statusLabels[selectedObj.status] ?? selectedObj.status}
-                  </p>
-                </div>
-              </div>
+        {activeTab === 'building' && (
+          <HorizontalRankingChart
+            unit={buildingDimExtra?.unit ?? data.unit}
+            selectedId={data.buildingId}
+            onSelect={(bid) => onSelectBuilding(bid)}
+            items={(buildingDimExtra?.rows ?? []).map((r) => ({
+              id: r.id,
+              name: r.name,
+              usage: r.usage,
+              rank: r.rank,
+              coverageRate: r.coverage.rate,
+              statusText: r.reason || (statusLabels[r.status] ?? r.status),
+            }))}
+          />
+        )}
+      </section>
 
-              {selectedObjBreakdown.ambiguousWeight && (
-                <div className="rounded-[4px] border border-warning/35 bg-warning-soft/60 px-3 py-2 text-[11px] text-warning">
-                  存在未绑定分类或分项权重不足 100% 的计量点，已单列为「未分配分项/权重待明确」。
-                </div>
-              )}
+      {/* ── 3. Inline Contextual Attribution Bar: Selected Zone Sub-Item Breakdown (5 cols) + Bound Meters Grid (7 cols) ── */}
+      <section aria-label="联动分项构成与计量归属" className="arco-card p-5 text-[12px] tabular">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <span className="rounded-[2px] bg-primary-soft px-2 py-0.5 text-[11px] font-medium text-primary">
+              {selectedObj ? '已选空间/组织联动归属' : '整栋建筑分项汇总'}
+            </span>
+            <h3 className="text-[14px] font-semibold text-fg">
+              {selectedObj ? selectedObj.name : `${data.buildingName}（全部直属空间）`}
+            </h3>
+            {selectedObj && (
+              <span className="text-[12px] text-muted">
+                直属实测 <strong className="text-fg">{fmtNum(selectedObj.usage)} {data.unit}</strong>
+                {' · '}覆盖 {fmtPct(selectedObj.coverage.rate)} · {statusLabels[selectedObj.status] ?? selectedObj.status}
+              </span>
+            )}
+          </div>
+          {selectedObj && (
+            <button
+              type="button"
+              onClick={() => setSelectedObjId(null)}
+              className="rounded-[2px] border border-line px-2.5 py-1 text-[11px] text-fg-2 hover:bg-fill-1"
+            >
+              返回整栋
+            </button>
+          )}
+        </div>
 
-              <EnergyStructureChart
-                slices={selectedObjBreakdown.slices}
-                totalUsage={selectedObj.usage}
-                unit={data.unit}
-                layout="stack"
-                emptyLabel="该对象关联表具尚未配置分项权重"
-              />
-
-              <div className="border-t border-line pt-3">
-                <div className="mb-2 flex items-center justify-between text-[11px] text-muted">
-                  <span className="font-medium text-fg-2">归属计量点清单（{selectedObj.sources?.length ?? 0} 块）</span>
-                  <span>对象绑定溯源</span>
-                </div>
-                <ul className="divide-y divide-line rounded-[4px] border border-line text-[11px]">
-                  {(selectedObj.sources ?? []).map((s) => (
-                    <li key={`${s.terminalId}-${s.itemCode}`} className="px-2.5 py-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="truncate font-medium text-fg">{s.terminalName}</span>
-                        <span className="shrink-0 font-semibold text-fg">
-                          {fmtNum(s.usage)} {s.unit}
-                        </span>
-                      </div>
-                      <div className="mt-0.5 flex items-center justify-between text-[10px] text-muted">
-                        <span className="font-mono">{s.terminalId}</span>
-                        <span>有效 {s.valid}/{s.expected}</span>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </>
-          ) : (
-            <>
+        <div className="grid gap-5 lg:grid-cols-12">
+          <div className="space-y-3 lg:col-span-5">
+            <p className="text-[11px] font-medium text-fg-2">对应分项用能构成</p>
+            {selectedObj && selectedObjBreakdown ? (
+              <>
+                {selectedObjBreakdown.ambiguousWeight && (
+                  <div className="rounded-[4px] border border-warning/35 bg-warning-soft/60 px-3 py-2 text-[11px] text-warning">
+                    存在未绑定分类或分项权重不足 100% 的计量点，已单列为「未分配分项/权重待明确」。
+                  </div>
+                )}
+                <EnergyStructureChart
+                  slices={selectedObjBreakdown.slices}
+                  totalUsage={selectedObj.usage}
+                  unit={data.unit}
+                  layout="stack"
+                  emptyLabel="该对象关联表具尚未配置分项权重"
+                />
+              </>
+            ) : (
               <EnergyStructureChart
                 slices={buildingSlices}
                 totalUsage={classificationExtra?.totalUsage ?? data.buildingTotal}
@@ -2878,13 +2752,57 @@ function LiveObjectsOverviewView({
                 layout="stack"
                 emptyLabel="暂无分项构成数据"
               />
-              <p className="rounded-[4px] bg-fill-1/60 px-3 py-2 text-[11px] text-muted">
-                提示：点击左侧任意父空间、子空间或组织条目，此处将按实际表具与分类权重实时切换为该对象的分项构成及计量归属清单。
-              </p>
-            </>
-          )}
-        </aside>
-      </div>
+            )}
+          </div>
+
+          <div className="border-t border-line pt-4 lg:col-span-7 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-5">
+            <div className="mb-2.5 flex items-center justify-between text-[11px] text-muted">
+              <span className="font-medium text-fg-2">
+                {selectedObj
+                  ? `归属计量点清单（${selectedObj.sources?.length ?? 0} 块表）`
+                  : `建筑直属空间计量汇总（${allSources.length} 条来源）`}
+              </span>
+              <span>点击上方平面图区块即时切换对应表具</span>
+            </div>
+
+            {selectedObj ? (
+              <div className="grid gap-2.5 sm:grid-cols-2">
+                {(selectedObj.sources ?? []).map((s) => (
+                  <div key={`${s.terminalId}-${s.itemCode}`} className="rounded-[4px] border border-line bg-fill-1/30 px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate font-medium text-fg">{s.terminalName}</span>
+                      <span className="shrink-0 font-semibold text-fg">
+                        {fmtNum(s.usage)} {s.unit}
+                      </span>
+                    </div>
+                    <div className="mt-1 flex items-center justify-between text-[10px] text-muted">
+                      <span className="font-mono">{s.terminalId} · {s.sourceTable}</span>
+                      <span>有效 {s.valid}/{s.expected}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="grid gap-2.5 sm:grid-cols-2">
+                {allSources.slice(0, 6).map((s, idx) => (
+                  <div key={`${s.terminalId}-${s.itemCode}-${idx}`} className="rounded-[4px] border border-line bg-fill-1/30 px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate font-medium text-fg">{s.terminalName}</span>
+                      <span className="shrink-0 font-semibold text-fg">
+                        {fmtNum(s.usage)} {s.unit}
+                      </span>
+                    </div>
+                    <div className="mt-1 flex items-center justify-between text-[10px] text-muted">
+                      <span className="font-mono">{s.terminalId} · {s.sourceTable}</span>
+                      <span>有效 {s.valid}/{s.expected}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
 
       <SourceTraceTable sources={allSources} />
     </div>
@@ -2970,16 +2888,20 @@ function LiveRealtimeTrendView({
 
   return (
     <div className="space-y-4">
-      {/* ── 1. Explicit Simulated-Realtime Telemetry Banner + Granularity Switch + 4-Col Operational KPIs ── */}
-      <section aria-label="模拟实时状态与峰谷质量摘要" className="arco-card overflow-hidden">
+      {/* ── 1. Unified Full-Width Operational Telemetry Console (Zero 4-Box KPI / 8:4 Template Repetition) ── */}
+      <section aria-label="模拟实时状态与负荷遥测主曲线" className="arco-card overflow-hidden">
+        {/* Top Telemetry Command Strip */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line bg-fill-1/50 px-5 py-2.5 text-[12px] tabular">
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2.5">
             <span className="inline-flex items-center gap-1.5 rounded-[2px] bg-primary-soft px-2 py-0.5 text-[11px] font-medium text-primary">
               <Radio className={`h-3 w-3 ${simAutoRefresh ? 'animate-pulse' : ''}`} aria-hidden="true" />
-              {isSimulated ? '模拟实时刷新（模拟数据回放 · 非真实硬件直采）' : '实时监测模式'}
+              {isSimulated ? '模拟实时刷新 · 非真实硬件直采' : '实时监测模式'}
+            </span>
+            <span className="font-medium text-fg">
+              {data.buildingName} · {energyLabels[data.energy] ?? data.energy}
             </span>
             <span className="text-[11px] text-muted">
-              统计窗 [{fmtShanghaiDate(data.from)}, {fmtShanghaiDate(data.to)}) · {data.timezone} · 最近刷新 {lastPulseAt}
+              窗口 [{fmtShanghaiDate(data.from)}, {fmtShanghaiDate(data.to)}) · 最近刷新 {lastPulseAt}
             </span>
           </div>
 
@@ -3019,86 +2941,41 @@ function LiveRealtimeTrendView({
           </div>
         </div>
 
-        <div className="grid divide-y divide-line sm:grid-cols-2 lg:grid-cols-4 lg:divide-y-0 lg:divide-x tabular">
-          <div className="p-4">
-            <p className="text-[12px] font-medium text-fg-2">
-              {periodLabels[days] ?? '当前周期'}累计{energyLabels[data.energy] ?? data.energy}
-            </p>
-            <p className="mt-1.5 text-[24px] font-semibold leading-[30px] tracking-[-0.02em] text-fg">
-              {fmtNum(data.totalUsage)}
-              <span className="ml-1 text-[12px] font-normal text-muted">{data.unit}</span>
-            </p>
-            <p className="mt-1 text-[11px] text-muted">
-              {isHourly ? '单时均值' : '日均消耗'} {fmtNum(meanVal)} {data.unit} · 共 {series.length} 个时段
-            </p>
-          </div>
-
-          <div className="p-4">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">周期峰值 / 谷值</span>
-              {peakToMean != null && (
-                <span className="text-[11px] text-muted">峰均比 {peakToMean.toFixed(2)}×</span>
-              )}
-            </div>
-            <p className="mt-1.5 text-[20px] font-semibold leading-[30px] text-fg">
-              {peakEntry ? fmtNum(peakEntry.p.usage) : '—'}
-              <span className="mx-1.5 text-[12px] font-normal text-muted">/</span>
-              <span className="text-[16px] font-medium text-fg-2">{valleyEntry ? fmtNum(valleyEntry.p.usage) : '—'}</span>
-              <span className="ml-1 text-[11px] font-normal text-muted">{data.unit}</span>
-            </p>
-            <p className="mt-1 text-[11px] text-muted">
-              峰 {peakEntry ? formatSlotLabel(peakEntry.p) : '—'} · 谷 {valleyEntry ? formatSlotLabel(valleyEntry.p) : '—'}
-            </p>
-          </div>
-
-          <div className="p-4">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">数据覆盖与质量状态</span>
-              <span
-                className={`rounded-[2px] px-1.5 py-0 text-[10px] font-medium ${
-                  partialSlotIndices.length === 0 ? 'bg-positive-soft text-positive' : 'bg-warning-soft text-warning'
-                }`}
-              >
-                {partialSlotIndices.length === 0 ? '全槽完整' : `${partialSlotIndices.length} 个时段缺测`}
-              </span>
-            </div>
-            <p className="mt-1.5 text-[24px] font-semibold leading-[30px] text-fg">
-              {fmtPct(data.coverage.rate)}
-            </p>
-            <p className="mt-1 text-[11px] text-muted">
-              有效 {data.coverage.valid}/{data.coverage.expected} 槽 · 缺 {data.coverage.missing} · 疑 {data.coverage.suspect}
-            </p>
-          </div>
-
-          <div className="bg-fill-1/35 p-4">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">计量点在线与新鲜度</span>
-              <span className={`text-[11px] font-medium ${offlineCount > 0 ? 'text-negative' : 'text-positive'}`}>
-                {offlineCount > 0 ? `${offlineCount} 离线` : '全部在线'}
-              </span>
-            </div>
-            <p className="mt-1.5 text-[24px] font-semibold leading-[30px] text-positive">
-              {onlineCount}
-              <span className="ml-1 text-[14px] font-normal text-muted">/ {freshness.length} 块表</span>
-            </p>
-            <p className="mt-1 truncate text-[11px] text-muted">
-              最新入库 {latestReadingAt ? latestReadingAt.slice(0, 16).replace('T', ' ') : '—'}
-            </p>
-          </div>
-        </div>
-      </section>
-
-      {/* ── 2. Primary Analytical Stage: Unified Trend Chart + Slot Quality Strip (8 cols) + Peak-Valley & Freshness Sidebar (4 cols) ── */}
-      <div className="grid items-start gap-4 lg:grid-cols-12">
-        <section className="arco-card space-y-4 p-5 lg:col-span-8">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
+        {/* Dense Telemetry Readout Ribbon + Full-Width Primary Load Curve */}
+        <div className="space-y-4 p-5 tabular">
+          <div className="flex flex-wrap items-end justify-between gap-4 border-b border-line pb-3">
             <div>
               <h2 className="text-[15px] font-medium leading-[22px] text-fg">
-                {data.buildingName} · {periodLabels[days] ?? '历史周期'}{energyLabels[data.energy] ?? data.energy}负荷趋势
+                {periodLabels[days] ?? '历史周期'}{energyLabels[data.energy] ?? data.energy}负荷运行遥测曲线
               </h2>
-              <p className="mt-0.5 text-[12px] text-muted tabular">
-                单位 {data.unit} · 橙色虚线为周期均值；琥珀色高亮带标示存在缺测槽位的时段（缺测不按 0 补齐）
+              <p className="mt-0.5 text-[12px] text-muted">
+                橙色虚线为周期均值；琥珀色高亮带标示存在缺测槽位的时段（缺测绝不按 0 补齐）
               </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-4 text-[12px]">
+              <div>
+                <span className="text-[11px] text-muted">周期累计</span>
+                <p className="text-[18px] font-semibold leading-[22px] text-fg">
+                  {fmtNum(data.totalUsage)} <span className="text-[11px] font-normal text-muted">{data.unit}</span>
+                </p>
+              </div>
+              <div className="h-7 w-px bg-line" />
+              <div>
+                <span className="text-[11px] text-muted">数据覆盖</span>
+                <p className="text-[16px] font-semibold leading-[22px] text-fg">
+                  {fmtPct(data.coverage.rate)}{' '}
+                  <span className="text-[11px] font-normal text-muted">
+                    ({data.coverage.valid}/{data.coverage.expected})
+                  </span>
+                </p>
+              </div>
+              <div className="h-7 w-px bg-line" />
+              <div>
+                <span className="text-[11px] text-muted">计量在线</span>
+                <p className={`text-[16px] font-semibold leading-[22px] ${offlineCount > 0 ? 'text-warning' : 'text-positive'}`}>
+                  {onlineCount}/{freshness.length} 块表
+                </p>
+              </div>
             </div>
           </div>
 
@@ -3106,7 +2983,7 @@ function LiveRealtimeTrendView({
             points={series}
             unit={data.unit}
             wide
-            height={304}
+            height={326}
             seriesLabel={`${energyLabels[data.energy] ?? data.energy}实测 (${data.unit})`}
             referenceValue={meanVal}
             referenceLabel={meanVal != null ? `周期均值 ${fmtNum(meanVal)}` : undefined}
@@ -3114,11 +2991,13 @@ function LiveRealtimeTrendView({
             highlightLabel="部分缺测时段"
           />
 
-          {/* Compact Slot-Level Completeness Quality Strip */}
+          {/* Docked Slot-Level Completeness Quality Ribbon */}
           {series.length > 0 && (
-            <div className="border-t border-line pt-3.5 tabular">
+            <div className="border-t border-line pt-3.5">
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted">
-                <span className="font-medium text-fg-2">时段数据完整率质量条（每格对应 1 个统计时段）</span>
+                <span className="font-medium text-fg-2">
+                  时段采集完整率质量带（每格 = 1 个统计时段 · {partialSlotIndices.length === 0 ? '全槽完整' : `${partialSlotIndices.length} 个时段缺测`}）
+                </span>
                 <div className="flex items-center gap-3">
                   <span className="inline-flex items-center gap-1">
                     <span className="size-2 rounded-[1px] bg-positive/80" />100% 完整
@@ -3160,67 +3039,94 @@ function LiveRealtimeTrendView({
               )}
             </div>
           )}
+        </div>
+      </section>
+
+      {/* ── 2. Compact 2-Col Operational Telemetry Footer: Peak-Valley Envelope (4 cols) + Meter Health Grid (8 cols) ── */}
+      <div className="grid items-start gap-4 lg:grid-cols-12 tabular">
+        <section aria-label="峰谷负荷包络参数" className="arco-card p-5 text-[12px] lg:col-span-4">
+          <div className="mb-3 flex items-center justify-between border-b border-line pb-2">
+            <h3 className="text-[14px] font-medium text-fg">峰谷与负荷运行包络</h3>
+            {peakToMean != null && (
+              <span className="rounded-[2px] bg-fill-2 px-1.5 py-0 text-[11px] font-medium text-fg-2">
+                峰均比 {peakToMean.toFixed(2)}×
+              </span>
+            )}
+          </div>
+          <dl className="space-y-2 text-[12px]">
+            <div className="flex items-center justify-between gap-2 rounded-[2px] bg-fill-1/60 px-3 py-2">
+              <dt className="text-muted">最高峰值</dt>
+              <dd className="text-right font-semibold text-fg">
+                {peakEntry ? `${fmtNum(peakEntry.p.usage)} ${data.unit}` : '—'}
+                <span className="ml-1.5 text-[11px] font-normal text-muted">
+                  ({peakEntry ? formatSlotLabel(peakEntry.p) : '—'})
+                </span>
+              </dd>
+            </div>
+            <div className="flex items-center justify-between gap-2 rounded-[2px] bg-fill-1/60 px-3 py-2">
+              <dt className="text-muted">最低谷值</dt>
+              <dd className="text-right font-medium text-fg-2">
+                {valleyEntry ? `${fmtNum(valleyEntry.p.usage)} ${data.unit}` : '—'}
+                <span className="ml-1.5 text-[11px] font-normal text-muted">
+                  ({valleyEntry ? formatSlotLabel(valleyEntry.p) : '—'})
+                </span>
+              </dd>
+            </div>
+            <div className="flex items-center justify-between gap-2 px-1 pt-1">
+              <dt className="text-muted">峰谷绝对差</dt>
+              <dd className="font-medium text-fg">
+                {peakValleySpread != null ? `${fmtNum(peakValleySpread)} ${data.unit}` : '—'}
+              </dd>
+            </div>
+            <div className="flex items-center justify-between gap-2 px-1">
+              <dt className="text-muted">{isHourly ? '单时均值' : '日均消耗'}</dt>
+              <dd className="font-medium text-fg-2">{meanVal != null ? `${fmtNum(meanVal)} ${data.unit}` : '—'}</dd>
+            </div>
+            <div className="flex items-center justify-between gap-2 px-1">
+              <dt className="text-muted">最新入库时间</dt>
+              <dd className="font-mono text-[11px] text-muted">
+                {latestReadingAt ? latestReadingAt.slice(0, 16).replace('T', ' ') : '—'}
+              </dd>
+            </div>
+          </dl>
         </section>
 
-        {/* Right 4 Cols: Peak-Valley Profile + Metering Point Freshness Monitor */}
-        <aside aria-label="峰谷特征与计量点新鲜度" className="arco-card space-y-4 p-5 text-[12px] tabular lg:col-span-4">
-          <div>
-            <h3 className="mb-2.5 border-b border-line pb-2 text-[14px] font-medium text-fg">峰谷与负荷特征</h3>
-            <dl className="space-y-1.5 rounded-[4px] bg-fill-1/60 p-3 text-[11px]">
-              <div className="flex justify-between gap-2">
-                <dt className="text-muted">最高峰值时段</dt>
-                <dd className="font-semibold text-fg">
-                  {peakEntry ? `${formatSlotLabel(peakEntry.p)} · ${fmtNum(peakEntry.p.usage)} ${data.unit}` : '—'}
-                </dd>
-              </div>
-              <div className="flex justify-between gap-2">
-                <dt className="text-muted">最低谷值时段</dt>
-                <dd className="font-medium text-fg-2">
-                  {valleyEntry ? `${formatSlotLabel(valleyEntry.p)} · ${fmtNum(valleyEntry.p.usage)} ${data.unit}` : '—'}
-                </dd>
-              </div>
-              <div className="flex justify-between gap-2">
-                <dt className="text-muted">峰谷绝对差</dt>
-                <dd className="font-medium text-fg">
-                  {peakValleySpread != null ? `${fmtNum(peakValleySpread)} ${data.unit}` : '—'}
-                </dd>
-              </div>
-              <div className="flex justify-between gap-2">
-                <dt className="text-muted">周期平均负荷</dt>
-                <dd className="text-fg-2">{meanVal != null ? `${fmtNum(meanVal)} ${data.unit}` : '—'}</dd>
-              </div>
-            </dl>
+        <section aria-label="计量点在线与采集新鲜度状态格" className="arco-card p-5 text-[12px] lg:col-span-8">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2">
+            <h3 className="text-[14px] font-medium text-fg">计量点采集新鲜度监控格</h3>
+            <span className="text-[11px] text-muted">
+              在线 <strong className="text-positive">{onlineCount}</strong> · 离线{' '}
+              <strong className={offlineCount > 0 ? 'text-negative' : 'text-fg-2'}>{offlineCount}</strong> · 共 {freshness.length} 块表
+            </span>
           </div>
-
-          <div className="border-t border-line pt-3.5">
-            <div className="mb-2 flex items-center justify-between">
-              <h3 className="text-[14px] font-medium text-fg">计量点采集新鲜度</h3>
-              <span className="text-[11px] text-muted">{freshness.length} 块表</span>
-            </div>
-            <ul className="divide-y divide-line rounded-[4px] border border-line text-[11px]">
-              {freshness.map((f) => (
-                <li key={`${f.terminalId}:${f.itemCode}`} className="px-3 py-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="flex min-w-0 items-center gap-1.5">
-                      <span
-                        className={`size-2 shrink-0 rounded-full ${f.online ? 'bg-positive' : 'bg-negative'}`}
-                        aria-hidden="true"
-                      />
-                      <span className="truncate font-medium text-fg">{f.terminalName}</span>
-                    </span>
-                    <span className={`shrink-0 ${f.online ? 'text-positive' : 'text-negative'}`}>
-                      {f.online ? '在线' : '离线'}
-                    </span>
-                  </div>
-                  <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted">
-                    <span className="font-mono">{f.sourceTable} · {f.hourRows} 时段行</span>
-                    <span>{f.latestAt ? f.latestAt.slice(5, 16).replace('T', ' ') : '无读数'}</span>
-                  </div>
-                </li>
-              ))}
-            </ul>
+          <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
+            {freshness.map((f) => (
+              <div
+                key={`${f.terminalId}:${f.itemCode}`}
+                className={`rounded-[4px] border px-3 py-2.5 ${
+                  f.online ? 'border-line bg-fill-1/25' : 'border-negative/40 bg-negative-soft/30'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <span
+                      className={`size-2 shrink-0 rounded-full ${f.online ? 'bg-positive' : 'bg-negative'}`}
+                      aria-hidden="true"
+                    />
+                    <span className="truncate font-medium text-fg">{f.terminalName}</span>
+                  </span>
+                  <span className={`shrink-0 text-[11px] font-medium ${f.online ? 'text-positive' : 'text-negative'}`}>
+                    {f.online ? '在线' : '离线'}
+                  </span>
+                </div>
+                <div className="mt-1.5 flex items-center justify-between gap-2 text-[10px] text-muted">
+                  <span className="font-mono">{f.sourceTable} · {f.hourRows} 行</span>
+                  <span>{f.latestAt ? f.latestAt.slice(5, 16).replace('T', ' ') : '无读数'}</span>
+                </div>
+              </div>
+            ))}
           </div>
-        </aside>
+        </section>
       </div>
 
       {/* ── 3. Collapsible Full Freshness Technical Ledger (Default Collapsed) ── */}
@@ -5657,123 +5563,195 @@ function LiveAnomalyView({
         ? 'text-fg-2'
         : 'text-positive';
 
+  const verdictBorder = isUsageCandidate
+    ? 'border-l-warning'
+    : isMeteringAnomaly
+      ? 'border-l-negative'
+      : isInsufficient
+        ? 'border-l-line-strong'
+        : 'border-l-positive';
+
   return (
     <div className="space-y-4">
-      {/* ── 1. Diagnostic Command Band (Strict Separation: Usage Candidate vs Metering Quality vs Insufficient Evidence) ── */}
-      <section aria-label="异常识别判定与基线偏差摘要" className="arco-card overflow-hidden">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-fill-1/50 px-5 py-2 text-[12px]">
-          <div className="flex flex-wrap items-center gap-2">
-            <span
-              className={`rounded-[2px] px-2 py-0.5 text-[11px] font-medium ${
-                isUsageCandidate
-                  ? 'bg-warning-soft text-warning'
-                  : isMeteringAnomaly
-                    ? 'bg-negative-soft text-negative'
-                    : isInsufficient
-                      ? 'bg-fill-2 text-fg-2'
-                      : 'bg-positive-soft text-positive'
-              }`}
-            >
-              {isUsageCandidate
-                ? '用能异常候选 · 待人工核查（非已确认浪费）'
+      {/* ── 1. Compact Rule Verdict & Threshold Command Bar (Zero 4-Box KPI Repetition) ── */}
+      <section
+        aria-label="异常识别判定与规则门禁命令条"
+        className={`arco-card flex flex-wrap items-center justify-between gap-3 border-l-[3px] px-5 py-3 text-[12px] tabular ${verdictBorder}`}
+      >
+        <div className="flex flex-wrap items-center gap-2.5">
+          <span
+            className={`rounded-[2px] px-2 py-0.5 text-[11px] font-semibold ${
+              isUsageCandidate
+                ? 'bg-warning-soft text-warning'
                 : isMeteringAnomaly
-                  ? '计量质量问题 · 优先排查表计/采集'
+                  ? 'bg-negative-soft text-negative'
                   : isInsufficient
-                    ? '证据不足 · 样本或覆盖未达判定条件'
-                    : '未触发用能异常候选'}
-            </span>
-            <span className="text-muted">
-              规则版本 <strong className="font-mono font-medium text-fg">{data.activeRuleRevision || '未配置'}</strong>
-              {' · '}引擎 <span className="font-mono">{data.ruleVersion || 'f10-f17-v1'}</span>
-            </span>
-          </div>
-          <span className="text-[11px] text-muted tabular">
-            {data.buildingName} · {energyLabels[data.energy] ?? data.energy} · 观测日 {anchorDate}
+                    ? 'bg-fill-2 text-fg-2'
+                    : 'bg-positive-soft text-positive'
+            }`}
+          >
+            {statusLabels[data.status] ?? data.status}
           </span>
+          <span className="font-medium text-fg">
+            {data.buildingName} · {energyLabels[data.energy] ?? data.energy} ({anchorDate})
+          </span>
+          <span className="text-[11px] text-muted">
+            实测 <strong className="text-fg">{fmtNum(data.current)}</strong> vs 基线{' '}
+            <strong className="text-fg">{fmtNum(data.baseline)}</strong> {data.unit} ({data.baselineCount} 天样本)
+          </span>
+          {data.changeRate != null && (
+            <span className={`font-semibold ${verdictTone}`}>
+              偏差 {data.changeRate > 0 ? '+' : ''}
+              {fmtPct(data.changeRate)}
+              {data.delta != null ? ` (${data.delta > 0 ? '+' : ''}${fmtNum(data.delta)} ${data.unit})` : ''}
+            </span>
+          )}
         </div>
 
-        <div className="grid divide-y divide-line sm:grid-cols-2 lg:grid-cols-4 lg:divide-y-0 lg:divide-x tabular">
-          <div className="p-4 lg:p-5">
-            <p className="text-[12px] font-medium text-fg-2">服务端判定结论</p>
-            <p className={`mt-2 text-[22px] font-semibold leading-[30px] ${verdictTone}`}>
-              {statusLabels[data.status] ?? data.status}
-            </p>
-            <p className="mt-1.5 text-[11px] text-muted">
-              {data.reason
-                ? `原因：${statusLabels[data.reason] ?? data.reason}`
-                : isUsageCandidate
-                  ? '需结合运行班次与现场核查确认，不直接定性为浪费'
-                  : '严格遵循服务端规则引擎判定结果'}
-            </p>
-          </div>
-
-          <div className="p-4 lg:p-5">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">观测日实测用量</span>
-              <span className="text-[11px] text-muted">覆盖 {fmtPct(data.coverage.rate)}</span>
-            </div>
-            <p className="mt-2 text-[24px] font-semibold leading-[30px] text-fg">
-              {fmtNum(data.current)}
-              <span className="ml-1 text-[12px] font-normal text-muted">{data.unit}</span>
-            </p>
-            <p className="mt-1.5 text-[11px] text-muted">
-              有效 {data.coverage.valid}/{data.coverage.expected} 槽 · 缺 {data.coverage.missing} · 疑 {data.coverage.suspect}
-            </p>
-          </div>
-
-          <div className="p-4 lg:p-5">
-            <p className="text-[12px] font-medium text-fg-2">
-              同星期历史参考基线（{data.baselineCount} 天样本）
-            </p>
-            <p className="mt-2 text-[24px] font-semibold leading-[30px] text-fg">
-              {fmtNum(data.baseline)}
-              {data.baseline != null && <span className="ml-1 text-[12px] font-normal text-muted">{data.unit}</span>}
-            </p>
-            <p className="mt-1.5 text-[11px] text-muted">
-              {matchedRule
-                ? `规则门禁：至少 ${matchedRule.minimumHistory} 个同星期完整日`
-                : '按同星期历史完整日中位数计算'}
-            </p>
-          </div>
-
-          <div className="bg-fill-1/35 p-4 lg:p-5">
-            <p className="text-[12px] font-medium text-fg-2">规则偏差量与偏差率</p>
-            <p
-              className={`mt-2 text-[24px] font-semibold leading-[30px] ${
-                data.delta != null && data.delta > 0 ? 'text-warning' : 'text-fg'
-              }`}
-            >
-              {data.changeRate != null ? `${data.changeRate > 0 ? '+' : ''}${fmtPct(data.changeRate)}` : '—'}
-              {data.delta != null && (
-                <span className="ml-1.5 text-[12px] font-normal text-muted">
-                  ({data.delta > 0 ? '+' : ''}
-                  {fmtNum(data.delta)} {data.unit})
-                </span>
-              )}
-            </p>
-            <p className="mt-1.5 text-[11px] text-muted">
-              {matchedRule
-                ? `触发阈值：≥ +${fmtNum(matchedRule.minimumAbsoluteIncrease)} ${data.unit} 且 ≥ +${fmtPct(matchedRule.minimumRelativeIncrease)}`
-                : `底层计量质量异常计数：${exceptions.length} 条`}
-            </p>
-          </div>
+        <div className="flex flex-wrap items-center gap-3 text-[11px] text-muted">
+          <span>
+            覆盖 <strong className="text-fg-2">{fmtPct(data.coverage.rate)}</strong> ({data.coverage.valid}/{data.coverage.expected})
+          </span>
+          <span>
+            规则 <strong className="font-mono text-fg-2">{data.activeRuleRevision || '未配置'}</strong>
+          </span>
+          {matchedRule && (
+            <span>
+              门禁 ≥ +{fmtNum(matchedRule.minimumAbsoluteIncrease)} {data.unit} 且 ≥ +{fmtPct(matchedRule.minimumRelativeIncrease)}
+            </span>
+          )}
         </div>
       </section>
 
-      {/* ── 2. Primary Diagnostic Stage: Trend & Baseline Chart (8 cols) + Clickable Anomaly & Evidence Inspector (4 cols) ── */}
-      <div className="grid gap-4 lg:grid-cols-12">
-        <section className="arco-card p-5 lg:col-span-8">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+      {/* ── 2. Reversed Triage-First Diagnostic Split: Left 4-Col Event Queue -> Right 8-Col Evidence & Meter Verification Stage ── */}
+      <div className="grid items-start gap-4 lg:grid-cols-12">
+        {/* Left 4 Cols: Anomaly Event Triage Queue + Selected Event Boundary Spec */}
+        <aside aria-label="异常分类分诊队列与规则边界" className="arco-card flex flex-col gap-4 p-5 lg:col-span-4">
+          <div>
+            <div className="mb-2.5 flex items-center justify-between gap-2 border-b border-line pb-2">
+              <div>
+                <h2 className="text-[14px] font-semibold text-fg">异常分诊队列（先定性、再溯源）</h2>
+                <p className="mt-0.5 text-[11px] text-muted">严格区分用能异常候选与采集质量异常</p>
+              </div>
+              <span className="rounded-[2px] bg-fill-2 px-1.5 py-0.5 text-[11px] font-medium text-fg-2 tabular">
+                {diagnosticItems.length} 项
+              </span>
+            </div>
+
+            <div className="space-y-2">
+              {diagnosticItems.map((it) => {
+                const isSel = activeItem?.key === it.key;
+                const badgeClass =
+                  it.kind === 'usage_candidate'
+                    ? 'bg-warning-soft text-warning'
+                    : it.kind === 'metering_quality'
+                      ? 'bg-negative-soft text-negative'
+                      : 'bg-fill-2 text-fg-2';
+                const accentBar =
+                  it.kind === 'usage_candidate'
+                    ? 'border-l-warning'
+                    : it.kind === 'metering_quality'
+                      ? 'border-l-negative'
+                      : 'border-l-line-strong';
+                return (
+                  <button
+                    key={it.key}
+                    type="button"
+                    data-anomaly-item={it.key}
+                    onClick={() => setSelectedEventKey(it.key)}
+                    className={`w-full rounded-[4px] border border-l-[3px] px-3 py-2.5 text-left transition-colors ${accentBar} ${
+                      isSel
+                        ? 'border-primary/50 bg-primary-soft/45'
+                        : 'border-line bg-surface hover:bg-fill-1'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate text-[12px] font-medium text-fg">{it.title}</span>
+                      <span className={`shrink-0 rounded-[2px] px-1.5 py-0 text-[10px] font-medium leading-[16px] ${badgeClass}`}>
+                        {it.badge}
+                      </span>
+                    </div>
+                    <p className="mt-1 truncate text-[11px] text-muted tabular">{it.summary}</p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Embedded Boundary & Verdict Spec for the Selected Queue Event */}
+          {activeItem && (
+            <div className="border-t border-line pt-3.5 text-[12px] tabular">
+              <h3 className="mb-2 text-[13px] font-medium text-fg">当前事件判定边界与规则依据</h3>
+              <dl className="space-y-1.5 rounded-[4px] bg-fill-1/60 p-3 text-[11px]">
+                <div className="flex justify-between gap-2">
+                  <dt className="shrink-0 text-muted">定性分类</dt>
+                  <dd className="text-right font-medium text-fg">{activeItem.badge}</dd>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <dt className="shrink-0 text-muted">观测窗口</dt>
+                  <dd className="text-right text-fg">{activeItem.timeRange}</dd>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <dt className="shrink-0 text-muted">规则版本</dt>
+                  <dd className="text-right font-mono text-fg">{activeItem.ruleInfo}</dd>
+                </div>
+                {activeItem.key === '__usage__' && matchedRule && (
+                  <>
+                    <div className="flex justify-between gap-2">
+                      <dt className="shrink-0 text-muted">触发阈值</dt>
+                      <dd className="text-right text-fg">
+                        ≥ +{fmtNum(matchedRule.minimumAbsoluteIncrease)} {data.unit} 且 ≥ +{fmtPct(matchedRule.minimumRelativeIncrease)}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <dt className="shrink-0 text-muted">历史样本门禁</dt>
+                      <dd className="text-right text-fg">
+                        {data.baselineCount} / {matchedRule.minimumHistory} 个同星期完整日
+                      </dd>
+                    </div>
+                  </>
+                )}
+                {activeItem.terminalId && (
+                  <div className="flex justify-between gap-2">
+                    <dt className="shrink-0 text-muted">异常终端</dt>
+                    <dd className="text-right font-mono text-fg">
+                      {activeItem.terminalId} ({activeItem.errorType} × {activeItem.count})
+                    </dd>
+                  </div>
+                )}
+                {matchedMeterInfo && (
+                  <div className="flex justify-between gap-2">
+                    <dt className="shrink-0 text-muted">数据来源</dt>
+                    <dd className="text-right font-mono text-fg">
+                      {matchedMeterInfo.sourceTable} · {matchedMeterInfo.itemCode}
+                    </dd>
+                  </div>
+                )}
+              </dl>
+              <p className="mt-2 text-[11px] leading-relaxed text-muted">
+                {data.reason
+                  ? `服务端备注：${statusLabels[data.reason] ?? data.reason}`
+                  : isUsageCandidate
+                    ? '说明：用能异常候选需结合运行班次、气候与现场设备核查，不可直接定性为已确认浪费。'
+                    : '严格遵循服务端规则引擎判定结果与覆盖率约束。'}
+              </p>
+            </div>
+          )}
+        </aside>
+
+        {/* Right 8 Cols: Deviation Evidence Chart + Docked Root-Cause Metering Point Checklist */}
+        <section className="arco-card space-y-5 p-5 lg:col-span-8">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h2 className="text-[15px] font-medium leading-[22px] text-fg">
                 {chartView === 'history'
-                  ? '能耗趋势、同星期参考基线与规则命中区间'
+                  ? '同星期参考基线对照与规则命中证据'
                   : `观测日（${anchorDate}）24 小时负荷曲线与基线时均对照`}
               </h2>
               <p className="mt-0.5 text-[12px] text-muted tabular">
                 {chartView === 'history'
-                  ? '琥珀色垂直带标记服务端规则命中的异常候选日；点击时间点联动右侧溯源面板'
-                  : '展示观测日逐时负荷波动与历史基线时均对照，用于现场核查异常时段'}
+                  ? '琥珀色标记服务端规则命中的异常候选日；结合下方关联表计清单定位具体排查对象'
+                  : '展示观测日逐时负荷波动与历史基线时均对照，用于现场锁定异常升高时段'}
               </p>
             </div>
             <div className="inline-flex rounded-[2px] border border-line bg-fill-1 p-0.5 text-[12px]">
@@ -5834,123 +5812,42 @@ function LiveAnomalyView({
               height={304}
             />
           )}
-        </section>
 
-        {/* Right 4 Cols: Categorized Anomaly List + Selected Item Evidence Trace */}
-        <aside aria-label="异常分类清单与证据溯源" className="arco-card flex flex-col gap-4 p-5 lg:col-span-4">
-          <div>
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <h2 className="text-[15px] font-medium text-fg">异常分类清单（点击溯源）</h2>
-              <span className="text-[11px] text-muted tabular">共 {diagnosticItems.length} 项</span>
+          {/* Docked Root-Cause Metering Point Verification Checklist */}
+          <div className="border-t border-line pt-4 tabular">
+            <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 text-[12px]">
+              <h3 className="font-medium text-fg">
+                关联计量点现场核查清单（{daySources.length} 块表 · {data.buildingName}）
+              </h3>
+              <span className="text-[11px] text-muted">
+                底层计量质量异常计数：{exceptions.length} 条 · 缺测 {data.coverage.missing} · 可疑 {data.coverage.suspect}
+              </span>
             </div>
-            <div className="space-y-1.5">
-              {diagnosticItems.map((it) => {
-                const isSel = activeItem?.key === it.key;
-                const badgeClass =
-                  it.kind === 'usage_candidate'
-                    ? 'bg-warning-soft text-warning'
-                    : it.kind === 'metering_quality'
-                      ? 'bg-negative-soft text-negative'
-                      : 'bg-fill-2 text-fg-2';
-                return (
-                  <button
-                    key={it.key}
-                    type="button"
-                    data-anomaly-item={it.key}
-                    onClick={() => setSelectedEventKey(it.key)}
-                    className={`w-full rounded-[4px] border px-3 py-2 text-left transition-colors ${
-                      isSel
-                        ? 'border-primary/45 bg-primary-soft/50'
-                        : 'border-line bg-surface hover:bg-fill-1'
-                    }`}
+            {daySources.length === 0 ? (
+              <p className="rounded-[4px] bg-fill-1/50 px-3 py-2.5 text-[11px] text-muted">读取关联计量点中…</p>
+            ) : (
+              <div className="grid gap-2.5 sm:grid-cols-2">
+                {daySources.map((s, idx) => (
+                  <div
+                    key={`${s.terminalId}-${s.itemCode}-${idx}`}
+                    className="rounded-[4px] border border-line bg-fill-1/30 px-3 py-2 text-[11px]"
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-[12px] font-medium text-fg">{it.title}</span>
-                      <span className={`shrink-0 rounded-[2px] px-1.5 py-0 text-[10px] font-medium leading-[16px] ${badgeClass}`}>
-                        {it.badge}
+                      <span className="truncate font-medium text-fg">{s.terminalName}</span>
+                      <span className="shrink-0 font-semibold text-fg">
+                        {fmtNum(s.usage)} {s.unit}
                       </span>
                     </div>
-                    <p className="mt-1 truncate text-[11px] text-muted tabular">{it.summary}</p>
-                  </button>
-                );
-              })}
-            </div>
+                    <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted">
+                      <span className="font-mono">{s.terminalId}/{s.itemCode} · {s.sourceTable}</span>
+                      <span>有效 {s.valid}/{s.expected}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-
-          {/* Linked Diagnostic Evidence Detail Card */}
-          {activeItem && (
-            <div className="border-t border-line pt-3.5 text-[12px] tabular">
-              <h3 className="mb-2 text-[13px] font-medium text-fg">选中异常溯源证据</h3>
-              <dl className="space-y-1.5 rounded-[4px] bg-fill-1/60 p-3 text-[11px]">
-                <div className="flex justify-between gap-2">
-                  <dt className="shrink-0 text-muted">异常分类</dt>
-                  <dd className="text-right font-medium text-fg">{activeItem.badge}</dd>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <dt className="shrink-0 text-muted">时间范围</dt>
-                  <dd className="text-right text-fg">{activeItem.timeRange}</dd>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <dt className="shrink-0 text-muted">命中规则</dt>
-                  <dd className="text-right font-mono text-fg">{activeItem.ruleInfo}</dd>
-                </div>
-                {activeItem.key === '__usage__' && matchedRule && (
-                  <div className="flex justify-between gap-2">
-                    <dt className="shrink-0 text-muted">阈值口径</dt>
-                    <dd className="text-right text-fg">
-                      ≥ +{fmtNum(matchedRule.minimumAbsoluteIncrease)} {data.unit} 且 ≥ +{fmtPct(matchedRule.minimumRelativeIncrease)}
-                    </dd>
-                  </div>
-                )}
-                {activeItem.terminalId && (
-                  <div className="flex justify-between gap-2">
-                    <dt className="shrink-0 text-muted">异常终端</dt>
-                    <dd className="text-right font-mono text-fg">
-                      {activeItem.terminalId} ({activeItem.errorType} × {activeItem.count})
-                    </dd>
-                  </div>
-                )}
-                {matchedMeterInfo && (
-                  <div className="flex justify-between gap-2">
-                    <dt className="shrink-0 text-muted">数据来源</dt>
-                    <dd className="text-right font-mono text-fg">
-                      {matchedMeterInfo.sourceTable} · {matchedMeterInfo.itemCode}
-                    </dd>
-                  </div>
-                )}
-              </dl>
-
-              {/* Metering points & data sources for usage candidate */}
-              {activeItem.key === '__usage__' && (
-                <div className="mt-3">
-                  <div className="mb-1.5 flex items-center justify-between text-[11px] text-muted">
-                    <span className="font-medium text-fg-2">涉及计量点与数据来源（{daySources.length} 块表）</span>
-                    <span>{data.buildingId}</span>
-                  </div>
-                  {daySources.length === 0 ? (
-                    <p className="text-[11px] text-muted">读取关联计量点中…</p>
-                  ) : (
-                    <ul className="divide-y divide-line rounded-[4px] border border-line text-[11px]">
-                      {daySources.map((s, idx) => (
-                        <li key={`${s.terminalId}-${s.itemCode}-${idx}`} className="flex items-center justify-between gap-2 px-2.5 py-1.5">
-                          <span className="min-w-0 truncate">
-                            <span className="font-medium text-fg">{s.terminalName}</span>
-                            <span className="ml-1.5 font-mono text-[10px] text-muted">
-                              {s.terminalId}/{s.itemCode} · {s.sourceTable}
-                            </span>
-                          </span>
-                          <span className="shrink-0 font-semibold text-fg">
-                            {fmtNum(s.usage)} {s.unit}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </aside>
+        </section>
       </div>
     </div>
   );
@@ -7419,104 +7316,57 @@ function LiveDiagnosisView({
 
   return (
     <div className="space-y-4">
-      {/* ── 1. Three-Lens Diagnostic Distinction Strip (Volume ≠ Intensity ≠ Anomaly Growth) ── */}
-      <section aria-label="高耗能三维度诊断区分" className="arco-card overflow-hidden">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-fill-1/50 px-5 py-2 text-[12px] tabular">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium text-fg">
-              {energyLabels[data.energy] ?? data.energy}高耗能对象三维度诊断（复用 F07 / F11 / F10 实算口径）
-            </span>
-            <span className="text-muted">自然日 {fmtShanghaiDate(data.from)} · {data.timezone}</span>
-          </div>
-          <span className="text-[11px] text-muted">
-            严格区分「高用量」「高面积强度」「异常增长」，不混为一谈
+      {/* ── 1. Compact Three-Lens Distinction Bar (Volume ≠ Intensity ≠ Anomaly Growth — Zero 4-Box KPI Repetition) ── */}
+      <section aria-label="高耗能三维度诊断区分" className="arco-card flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-[12px] tabular">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <span className="font-semibold text-fg">
+            {energyLabels[data.energy] ?? data.energy}高耗能二维诊断
           </span>
+          <span className="text-[11px] text-muted">自然日 {fmtShanghaiDate(data.from)}</span>
+          <span className="inline-flex items-center gap-1 rounded-[2px] bg-primary-soft/60 px-2 py-0.5 text-[11px]">
+            <span className="font-medium text-primary">高用量 F07</span>
+            <strong className="text-fg">{topVolumeBldg?.name ?? '—'}</strong>
+            {topVolumeBldg && <span className="text-muted">({fmtNum(topVolumeBldg.usage)} {data.unit})</span>}
+          </span>
+          <span className="inline-flex items-center gap-1 rounded-[2px] bg-[#E8FFFB] px-2 py-0.5 text-[11px]">
+            <span className="font-medium text-[#0AA5A2]">高强度 F11</span>
+            <strong className="text-fg">{topIntensityBldg?.name ?? '不可比'}</strong>
+            {topIntensityBldg && <span className="text-muted">({fmtNum(topIntensityBldg.intensity)} {topIntensityBldg.intensityUnit})</span>}
+          </span>
+          <span
+            className={`inline-flex items-center gap-1 rounded-[2px] px-2 py-0.5 text-[11px] ${
+              topAnomalyBldg ? 'bg-warning-soft text-warning' : 'bg-fill-2 text-fg-2'
+            }`}
+          >
+            <span className="font-medium">异常增长 F10</span>
+            <strong>{topAnomalyBldg ? `${topAnomalyBldg.name} (+${fmtPct(topAnomalyBldg.anomalyRate)})` : '无超阈值候选'}</strong>
+          </span>
+          {topSystem && (
+            <span className="inline-flex items-center gap-1 rounded-[2px] bg-fill-1 px-2 py-0.5 text-[11px] text-fg-2">
+              <span>主力系统</span>
+              <strong className="text-fg">{topSystem.name}</strong> ({fmtPct(topSystem.share)})
+            </span>
+          )}
         </div>
-
-        <div className="grid divide-y divide-line sm:grid-cols-2 lg:grid-cols-4 lg:divide-y-0 lg:divide-x tabular">
-          <div className="p-4">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">高用量领先（总量贡献）</span>
-              <span className="rounded-[2px] bg-primary-soft px-1.5 py-0 text-[10px] font-medium text-primary">F07 口径</span>
-            </div>
-            <p className="mt-1.5 truncate text-[16px] font-semibold leading-[26px] text-fg">
-              {topVolumeBldg?.name ?? '—'}
-            </p>
-            <p className="mt-1 text-[11px] text-muted">
-              {topVolumeBldg
-                ? `${fmtNum(topVolumeBldg.usage)} ${data.unit} · 占园区 ${fmtPct(topVolumeBldg.share)}`
-                : '读取中…'}
-            </p>
-          </div>
-
-          <div className="p-4">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">高能耗强度领先（单位面积）</span>
-              <span className="rounded-[2px] bg-[#E8FFFB] px-1.5 py-0 text-[10px] font-medium text-[#0AA5A2]">F11 口径</span>
-            </div>
-            <p className="mt-1.5 truncate text-[16px] font-semibold leading-[26px] text-fg">
-              {topIntensityBldg?.name ?? '不可比'}
-            </p>
-            <p className="mt-1 text-[11px] text-muted">
-              {topIntensityBldg
-                ? `${fmtNum(topIntensityBldg.intensity)} ${topIntensityBldg.intensityUnit}（≠ 总量最高对象）`
-                : '缺少有效建筑面积分母'}
-            </p>
-          </div>
-
-          <div className="p-4">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">异常增长候选（较同星期基线）</span>
-              <span
-                className={`rounded-[2px] px-1.5 py-0 text-[10px] font-medium ${
-                  topAnomalyBldg ? 'bg-warning-soft text-warning' : 'bg-positive-soft text-positive'
-                }`}
-              >
-                {topAnomalyBldg ? `${anomalyCandidates.length} 栋命中` : '无异常候选'}
-              </span>
-            </div>
-            <p className="mt-1.5 truncate text-[16px] font-semibold leading-[26px] text-fg">
-              {topAnomalyBldg ? topAnomalyBldg.name : '当前无超阈值增长'}
-            </p>
-            <p className="mt-1 text-[11px] text-muted">
-              {topAnomalyBldg?.anomalyRate != null
-                ? `较同星期中位基线 +${fmtPct(topAnomalyBldg.anomalyRate)}（待核查，非已确认浪费）`
-                : 'F10 规则引擎未检出超门槛异常增长'}
-            </p>
-          </div>
-
-          <div className="bg-fill-1/35 p-4">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">园区主力高耗能系统</span>
-              <span className="rounded-[2px] bg-fill-2 px-1.5 py-0 text-[10px] text-fg-2">F06 分项</span>
-            </div>
-            <p className="mt-1.5 truncate text-[16px] font-semibold leading-[26px] text-fg">
-              {topSystem?.name ?? '—'}
-            </p>
-            <p className="mt-1 text-[11px] text-muted">
-              {topSystem
-                ? `${fmtNum(topSystem.usage)} ${data.unit} · 占 ${fmtPct(topSystem.share)}`
-                : '读取分项汇总中…'}
-            </p>
-          </div>
-        </div>
+        <span className="text-[11px] text-muted">复用 F07 / F11 / F10 实算口径 · 不混为一谈</span>
       </section>
 
-      {/* ── 2. Primary Diagnostic Stage: Ranking & Multi-Lens Matrix (8 cols) + Selected Object Trend/Structure/Sources (4 cols) ── */}
+      {/* ── 2. Primary Diagnostic Stage: 2D Volume×Intensity Quadrant Matrix (8 cols) + Selected Object Linked Inspector (4 cols) ── */}
       <div className="grid items-start gap-4 lg:grid-cols-12">
         <section className="arco-card space-y-4 p-5 lg:col-span-8">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h2 className="text-[15px] font-medium leading-[22px] text-fg">
                 {diagScope === 'space'
-                  ? '区域高耗能诊断排名'
+                  ? '区域「用能总量 × 面积能耗强度」二维诊断象限'
                   : diagScope === 'building'
-                    ? '建筑高耗能诊断排名'
-                    : '用能系统高耗能贡献排名'}
-                （{effectiveLens === 'intensity' ? '按单位面积能耗强度' : '按用能总量与占比贡献'}）
+                    ? '建筑「用能总量 × 面积能耗强度」二维诊断象限'
+                    : '园区用能系统贡献占比与主力建筑分布'}
               </h2>
               <p className="mt-0.5 text-[12px] text-muted">
-                点击任意对象联动右侧 7 日趋势、分项构成与计量来源；低覆盖或缺少有效面积的对象不强行排名
+                {diagScope === 'system'
+                  ? '用能系统跨空间聚合，按实测用量与占比贡献排序；点击系统查看主力建筑趋势与来源'
+                  : '同时定位「体量大」「强度高」「叠加异常增长」三类对象，区别于 F07 单维排名；点击气泡或表格行联动右侧'}
               </p>
             </div>
 
@@ -7557,7 +7407,7 @@ function LiveDiagnosisView({
                       metricLens === 'usage' ? 'bg-primary font-medium text-white' : 'text-fg-2 hover:text-fg'
                     }`}
                   >
-                    总量贡献
+                    按用量排序
                   </button>
                   <button
                     type="button"
@@ -7567,26 +7417,46 @@ function LiveDiagnosisView({
                       metricLens === 'intensity' ? 'bg-primary font-medium text-white' : 'text-fg-2 hover:text-fg'
                     }`}
                   >
-                    面积强度
+                    按强度排序
                   </button>
                 </div>
               )}
             </div>
           </div>
 
-          <HorizontalRankingChart
-            unit={effectiveLens === 'intensity' ? `${data.unit}/m²` : data.unit}
-            selectedId={selectedRecord?.id ?? null}
-            onSelect={(id) => setSelectedId(id)}
-            items={sortedRecords.map((r) => ({
-              id: r.id,
-              name: r.name,
-              usage: effectiveLens === 'intensity' ? r.intensity : r.usage,
-              rank: r.displayRank,
-              coverageRate: r.coverageRate,
-              statusText: effectiveLens === 'intensity' && r.intensity == null ? r.intensityReason : r.statusText,
-            }))}
-          />
+          {diagScope !== 'system' ? (
+            <DiagnosticQuadrantChart
+              unit={data.unit}
+              intensityUnit={`${data.unit}/m²`}
+              selectedId={selectedRecord?.id ?? null}
+              onSelect={(id) => setSelectedId(id)}
+              points={sortedRecords.map((r) => ({
+                id: r.id,
+                name: r.name,
+                subLabel: r.buildingName !== r.name ? r.buildingName : undefined,
+                usage: r.usage,
+                intensity: r.intensity,
+                comparable: r.comparable,
+                isAnomalyCandidate: r.isAnomalyCandidate,
+                anomalyRate: r.anomalyRate,
+                reason: r.intensity == null ? r.intensityReason : r.statusText,
+              }))}
+            />
+          ) : (
+            <HorizontalRankingChart
+              unit={data.unit}
+              selectedId={selectedRecord?.id ?? null}
+              onSelect={(id) => setSelectedId(id)}
+              items={sortedRecords.map((r) => ({
+                id: r.id,
+                name: r.name,
+                usage: r.usage,
+                rank: r.displayRank,
+                coverageRate: r.coverageRate,
+                statusText: r.statusText,
+              }))}
+            />
+          )}
 
           {/* Compact Multi-Lens Diagnostic Table (Shows Volume, Share, Intensity & Anomaly Tag Side-by-Side) */}
           <div className="border-t border-line pt-4">
