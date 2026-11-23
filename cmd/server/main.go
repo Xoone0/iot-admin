@@ -17,6 +17,10 @@ import (
 
 	"github.com/RenJieWeia/iot-admin/internal/admin"
 	"github.com/RenJieWeia/iot-admin/internal/broker"
+	"github.com/RenJieWeia/iot-admin/internal/buildingenergy"
+	"github.com/RenJieWeia/iot-admin/internal/buildingenergy/authguard"
+	"github.com/RenJieWeia/iot-admin/internal/buildingenergy/liveapi"
+	"github.com/RenJieWeia/iot-admin/internal/buildingenergy/pgadapter"
 	"github.com/RenJieWeia/iot-admin/internal/exception"
 	"github.com/RenJieWeia/iot-admin/internal/gateway"
 	"github.com/RenJieWeia/iot-admin/internal/ingest"
@@ -124,9 +128,16 @@ func run(log *slog.Logger) error {
 	// 快照分区维护：开机先跑一次，之后每日一次；失败只告警，不阻塞上报。
 	go maintainSnapshots(ctx, pool, now, log)
 
-	mux := newMux(proc, admin.WithAuth(nil, adminAPI.Handler()))
-
 	addr := env("IOT_LISTEN", "127.0.0.1:8080")
+	legacyAdmin := wrapLegacyAdminHandler(
+		admin.WithAuth(nil, adminAPI.Handler()),
+		addr,
+		envBool("IOT_LEGACY_ADMIN_LOOPBACK_ONLY"),
+		log,
+	)
+	energyHandler := buildFormalEnergyHandler(pool, log)
+	mux := newServerMux(proc, legacyAdmin, energyHandler)
+
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           withSecurityHeaders(mux),
@@ -185,9 +196,19 @@ func withSecurityHeaders(next http.Handler) http.Handler {
 
 // newMux 汇总全部对外路由；抽出来便于用例断言路径。
 // 单二进制交付：前端产物由 embed 从 /ui/ 提供，根路径统一跳过去。
+// 正式建筑能耗前缀 /admin/v1/energy-analysis/ 默认走 fail-closed 鉴权边界，不回退 AllowAll，
+// 且不影响既有 IoT 管理路由的原有行为。
 func newMux(proc *ingest.Processor, adminHandler http.Handler) http.Handler {
+	return newServerMux(proc, adminHandler, nil)
+}
+
+func newServerMux(proc *ingest.Processor, adminHandler, energyHandler http.Handler) http.Handler {
+	if energyHandler == nil {
+		energyHandler = authguard.NewFormalRouter(nil)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("POST /ingest/v1/messages", &ingest.HTTPHandler{P: proc})
+	mux.Handle(authguard.FormalRoutePrefix, energyHandler)
 	mux.Handle("/admin/v1/", adminHandler)
 	mux.Handle("GET /{$}", http.RedirectHandler("/ui/", http.StatusFound))
 	mux.Handle("/ui/", http.StripPrefix("/ui/", ui.Handler()))
@@ -226,4 +247,70 @@ func env(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// wrapLegacyAdminHandler keeps legacy /admin/v1/* behavior unchanged by default
+// (IOT_LEGACY_ADMIN_LOOPBACK_ONLY defaults to false for backward compatibility),
+// supports opt-in direct loopback isolation (rejecting both non-loopback peers
+// and same-host reverse-proxy forwarding headers), and emits structured security
+// logs documenting default-off exposure and same-host reverse-proxy risks.
+func wrapLegacyAdminHandler(adminHandler http.Handler, listenAddr string, loopbackOnly bool, log *slog.Logger) http.Handler {
+	if loopbackOnly {
+		if log != nil {
+			log.Info("旧 /admin/v1/* 已启用直连回环隔离（IOT_LEGACY_ADMIN_LOOPBACK_ONLY=true）；注意：若同机反代剥离了转发头仍须在网关层强制 SSO、mTLS 与路由 ACL",
+				"listen", listenAddr)
+		}
+		return admin.WithLoopbackOnly(adminHandler)
+	}
+	if log != nil {
+		if !admin.IsLoopbackAddr(listenAddr) {
+			log.Warn("安全风险告警：IOT_LEGACY_ADMIN_LOOPBACK_ONLY 默认关闭且旧 /admin/v1/* 处于 AllowAll 无鉴权状态，服务监听非回环地址将暴露网关凭据/原始流水/管理写入接口；必须由前置网关强制 SSO、mTLS 与路由 ACL，或开启 IOT_LEGACY_ADMIN_LOOPBACK_ONLY=true 并与接入面隔离",
+				"listen", listenAddr)
+		} else {
+			log.Info("旧 /admin/v1/* 当前保持默认兼容（IOT_LEGACY_ADMIN_LOOPBACK_ONLY=false）；若同机反向代理转发至本机回环地址，代理层必须强制 SSO、mTLS 与高危路由 ACL",
+				"listen", listenAddr)
+		}
+	}
+	return adminHandler
+}
+
+// buildFormalEnergyHandler mounts the authenticated live PostgreSQL building-energy
+// router when IOT_ENERGY_AUTH_* env vars are configured; otherwise stays fail-closed
+// (401 energy_auth_unconfigured). Never falls back to AllowAll and never auto-runs
+// energy_domain migrations during cmd/server startup.
+func buildFormalEnergyHandler(pool *pgxpool.Pool, log *slog.Logger) http.Handler {
+	cfg, ok := liveapi.LoadEnvAuthConfig()
+	if !ok {
+		if log != nil {
+			log.Info("正式建筑能耗接口保持默认拒绝（未配置 IOT_ENERGY_AUTH_SECRET/ISSUERS/AUDIENCE）")
+		}
+		return authguard.NewFormalRouter(nil)
+	}
+	guard, _, err := liveapi.BuildGuard(cfg, nil, nil)
+	if err != nil {
+		if log != nil {
+			log.Warn("正式建筑能耗鉴权配置校验失败，保持默认拒绝", "err", err)
+		}
+		return authguard.NewFormalRouter(nil)
+	}
+	svc := &liveapi.Service{
+		DB:       pgadapter.NewPGPool(pool),
+		Guard:    guard,
+		Project:  buildingenergy.ProjectKey{TenantID: cfg.TenantID, ProjectID: cfg.ProjectID},
+		Timezone: "Asia/Shanghai",
+	}
+	if log != nil {
+		log.Info("正式建筑能耗真实数据库接口已启用（HS256 + authguard，不自动执行 energy_domain 迁移）",
+			"tenant", cfg.TenantID, "project", cfg.ProjectID)
+	}
+	return liveapi.NewRouter(guard, svc)
 }

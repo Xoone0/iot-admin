@@ -19,6 +19,15 @@ export function MetaProvider({ children }: { children: ReactNode }) {
   const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
+    const pathname = typeof window !== 'undefined' ? window.location.pathname : '';
+    const energyLiveFlag = String(import.meta.env.VITE_ENERGY_LIVE ?? '');
+    const isEnergyLiveOnly =
+      (energyLiveFlag === '1' || energyLiveFlag === 'true') &&
+      (pathname === '/' || pathname === '/ui' || pathname === '/ui/' || pathname.includes('/a/energy'));
+    if (isEnergyLiveOnly) {
+      setLoading(false);
+      return;
+    }
     const controller = new AbortController();
     setLoading(true);
     setError(null);

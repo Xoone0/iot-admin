@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -99,5 +101,95 @@ func TestRoutes(t *testing.T) {
 	}
 	if got := rec.Header().Get("Referrer-Policy"); got != "same-origin" {
 		t.Fatalf("Referrer-Policy = %q，期望 same-origin", got)
+	}
+}
+
+func TestFormalBuildingEnergyPrefixFailsClosedWithoutAlteringLegacyAdmin(t *testing.T) {
+	legacyHit := false
+	legacyAdmin := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		legacyHit = true
+		w.WriteHeader(http.StatusOK)
+	})
+	h := withSecurityHeaders(newMux(nil, legacyAdmin))
+
+	// Even when legacy admin uses AllowAll and spoofed client headers are sent,
+	// formal building-energy routes fail closed with 401 and no-store.
+	for _, path := range []string{
+		"/admin/v1/energy-analysis/overview",
+		"/admin/v1/energy-analysis/reports/download",
+		"/admin/v1/energy-analysis/mappings",
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-User-ID", "admin")
+		req.Header.Set("X-Project-ID", "p1")
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized || legacyHit || rec.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("GET %s leaked or bypassed fail-closed boundary: code=%d legacyHit=%v cc=%q body=%s",
+				path, rec.Code, legacyHit, rec.Header().Get("Cache-Control"), rec.Body.String())
+		}
+	}
+
+	// Existing IoT admin routes continue to reach legacyAdmin unchanged.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/v1/terminals", nil))
+	if rec.Code != http.StatusOK || !legacyHit {
+		t.Fatalf("legacy /admin/v1/terminals broken: code=%d legacyHit=%v", rec.Code, legacyHit)
+	}
+}
+
+func TestWrapLegacyAdminHandlerIsolationAndWarning(t *testing.T) {
+	hits := 0
+	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Non-loopback bind without loopback isolation preserves legacy compatibility
+	// while emitting a structured security warning.
+	var warnBuf bytes.Buffer
+	warnLog := slog.New(slog.NewJSONHandler(&warnBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	unwrapped := wrapLegacyAdminHandler(base, "0.0.0.0:8080", false, warnLog)
+	req := httptest.NewRequest(http.MethodGet, "/admin/v1/terminals", nil)
+	req.RemoteAddr = "10.0.0.5:43210"
+	rec := httptest.NewRecorder()
+	unwrapped.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || hits != 1 {
+		t.Fatalf("default compatibility altered: code=%d hits=%d", rec.Code, hits)
+	}
+	if !strings.Contains(warnBuf.String(), "AllowAll") || !strings.Contains(warnBuf.String(), "0.0.0.0:8080") {
+		t.Fatalf("expected non-loopback AllowAll warning, got: %s", warnBuf.String())
+	}
+
+	// Opt-in loopback isolation blocks remote peers on /admin/v1/* (ignoring spoofed headers)
+	// while allowing loopback peers and leaving formal energy routes fail-closed.
+	hits = 0
+	isolated := newMux(nil, wrapLegacyAdminHandler(base, "0.0.0.0:8080", true, warnLog))
+
+	remoteAdmin := httptest.NewRequest(http.MethodGet, "/admin/v1/gateways/gw1/credential", nil)
+	remoteAdmin.RemoteAddr = "10.0.0.5:43210"
+	remoteAdmin.Header.Set("X-Forwarded-For", "127.0.0.1")
+	rec = httptest.NewRecorder()
+	isolated.ServeHTTP(rec, remoteAdmin)
+	if rec.Code != http.StatusForbidden || hits != 0 {
+		t.Fatalf("remote peer reached isolated legacy admin: code=%d hits=%d", rec.Code, hits)
+	}
+
+	localAdmin := httptest.NewRequest(http.MethodGet, "/admin/v1/terminals", nil)
+	localAdmin.RemoteAddr = "127.0.0.1:43210"
+	rec = httptest.NewRecorder()
+	isolated.ServeHTTP(rec, localAdmin)
+	if rec.Code != http.StatusOK || hits != 1 {
+		t.Fatalf("loopback peer blocked from isolated legacy admin: code=%d hits=%d", rec.Code, hits)
+	}
+
+	// Same-host reverse proxy (127.0.0.1 + X-Forwarded-For) is rejected when loopback isolation is enabled.
+	proxiedAdmin := httptest.NewRequest(http.MethodGet, "/admin/v1/raw-items", nil)
+	proxiedAdmin.RemoteAddr = "127.0.0.1:43210"
+	proxiedAdmin.Header.Set("X-Forwarded-For", "198.51.100.7")
+	rec = httptest.NewRecorder()
+	isolated.ServeHTTP(rec, proxiedAdmin)
+	if rec.Code != http.StatusForbidden || hits != 1 {
+		t.Fatalf("same-host proxied request reached isolated legacy admin: code=%d hits=%d", rec.Code, hits)
 	}
 }
