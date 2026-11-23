@@ -1,12 +1,13 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { X } from 'lucide-react';
-import type { ReactNode } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 
 export interface DrawerProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   title: ReactNode;
   description?: string;
+  trigger?: ReactElement;
   children: ReactNode;
   footer?: ReactNode;
 }
@@ -27,9 +28,10 @@ const motionCSS = `
 `;
 
 /** 右侧抽屉：唯一浮层容器，记录查看/编辑都复用它。 */
-export function Drawer({ open, onOpenChange, title, description, children, footer }: DrawerProps) {
+export function Drawer({ open, onOpenChange, title, description, trigger, children, footer }: DrawerProps) {
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      {trigger ? <Dialog.Trigger asChild>{trigger}</Dialog.Trigger> : null}
       <style>{motionCSS}</style>
       <Dialog.Portal>
         <Dialog.Overlay className="iot-drawer-overlay fixed inset-0 z-40 bg-black/40" />
