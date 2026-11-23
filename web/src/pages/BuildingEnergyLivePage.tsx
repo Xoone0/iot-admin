@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import { Activity, AlertTriangle, ArrowDownRight, ArrowRight, ArrowUpRight, CheckCircle2, KeyRound, Radio, RefreshCw, Settings2, ShieldAlert } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowDownRight, ArrowRight, ArrowUpRight, CheckCircle2, KeyRound, Maximize2, Radio, RefreshCw, RotateCcw, Settings2, ShieldAlert, X, ZoomIn, ZoomOut } from 'lucide-react';
 import { currentEnergyItem } from '../components/BuildingEnergyNavigation';
 import { EnergyManagementDrawer } from '../components/EnergyManagementDrawer';
 import { EnergyReportStudio } from '../components/EnergyReportStudio';
+import { EnergySankeyChart, EnergyTreemapChart, type SankeyMeterNodeMeta, type TreemapCategoryNode } from '../components/EnergyECharts';
 import { RetrofitWorkspace, type RetrofitData } from '../components/RetrofitWorkspace';
 import {
   AnomalyDistributionBarChart,
@@ -14,7 +16,6 @@ import {
   DeviationDivergingChart,
   DiagnosticQuadrantChart,
   DiscreteSampleCompareChart,
-  EnergyFlowBalanceChart,
   EnergyStructureChart,
   GroupedComparisonBarChart,
   HorizontalRankingChart,
@@ -597,7 +598,12 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
     if (section === 'realtime') qs.set('days', ['1', '7', '14', '30'].includes(days) ? days : '7');
     if (section === 'report-custom') {
       qs.set('scope', scope);
-      if (fieldsParam) qs.set('fields', fieldsParam);
+      const effectiveFields =
+        fieldsParam ||
+        (scope === 'consumption'
+          ? 'category_name,energy,usage,unit,share,coverage_rate,window_from'
+          : 'metric_name,building_name,metric_value,metric_unit,benchmark_max,benchmark_status,metric_status');
+      qs.set('fields', effectiveFields);
     }
     switch (section) {
       case 'overview': return `/overview?${qs}`;
@@ -731,7 +737,6 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
   const showBuildingFilter = section !== 'dimensions' && section !== 'diagnosis' && !isAssessmentSection && !isRetrofitSection;
   const showEnergyFilter =
     section !== 'overview' &&
-    section !== 'composition' &&
     section !== 'report-consumption' &&
     !isAssessmentSection &&
     !isRetrofitSection;
@@ -976,6 +981,7 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
           {section === 'composition' && (
             <LiveCompositionView
               data={activePayload as CompositionData}
+              selectedEnergy={energy}
               token={token}
               inventory={inventory}
               onOpenConfig={() => setDrawerOpen(true)}
@@ -1723,40 +1729,37 @@ function LiveOverviewView({
   );
 }
 
-// ── F02: Five-Energy Composition & Structure Change Workbench ───────────────
+// ── F02: Energy Structure & Contribution Analysis (ECharts Interactive Treemap) ──
 
 function LiveCompositionView({
   data,
+  selectedEnergy,
   token,
   inventory,
   onOpenConfig,
   onNavigateClassification,
 }: {
   data: CompositionData;
+  selectedEnergy: string;
   token: string;
   inventory: InventoryData | null;
   onOpenConfig: () => void;
   onNavigateClassification: (energy: string) => void;
 }) {
   const energies = data.energies ?? [];
-  const [focusEnergy, setFocusEnergy] = useState<string>(() => energies[0]?.energy ?? 'electricity');
-  const [selectedCatId, setSelectedCatId] = useState<string | null>(null);
+  const [drilledCatId, setDrilledCatId] = useState<string | null>(null);
+  const [sourceDrawerCatId, setSourceDrawerCatId] = useState<string | null>(null);
   const [prevComposition, setPrevComposition] = useState<CompositionData | null>(null);
 
   const anchorDate = fmtShanghaiDate(data.from);
+  const prevDateLabel = shiftShanghaiDate(anchorDate, -1);
 
   useEffect(() => {
-    if (energies.length > 0 && !energies.some((e) => e.energy === focusEnergy)) {
-      setFocusEnergy(energies[0].energy);
-      setSelectedCatId(null);
-    }
-  }, [energies, focusEnergy]);
+    setDrilledCatId(null);
+    setSourceDrawerCatId(null);
+  }, [selectedEnergy, data.buildingId, anchorDate]);
 
-  useEffect(() => {
-    setSelectedCatId(null);
-  }, [focusEnergy, data.buildingId]);
-
-  // Fetch previous day's server-computed composition for real structural share change (Δpp).
+  // Fetch previous day's server-computed composition for real structural share change (Δpp) & growth contribution.
   useEffect(() => {
     if (data.configurationState === 'unconfigured' || !data.buildingId || !anchorDate || anchorDate === '—') {
       setPrevComposition(null);
@@ -1779,15 +1782,11 @@ function LiveCompositionView({
     return <UnconfiguredNotice message={data.configurationMessage} onOpenConfig={onOpenConfig} />;
   }
 
-  const focusedCard = energies.find((e) => e.energy === focusEnergy) ?? energies[0] ?? null;
+  const focusedCard = energies.find((e) => e.energy === selectedEnergy) ?? energies[0] ?? null;
   const focusedLabel = focusedCard ? (energyLabels[focusedCard.energy] ?? focusedCard.energy) : '用电';
-  const prevEnergyMap = useMemo(
-    () => new Map((prevComposition?.energies ?? []).map((e) => [e.energy, e])),
-    [prevComposition?.energies],
-  );
-  const prevFocusedCard = focusedCard ? prevEnergyMap.get(focusedCard.energy) ?? null : null;
+  const prevFocusedCard = (prevComposition?.energies ?? []).find((e) => e.energy === focusedCard?.energy) ?? null;
 
-  // Map category bindings to link clicked category -> exact metering sources & allocation weights.
+  // Map confirmed category bindings to attach ONLY real bound metering points as Treemap children.
   const bindingMap = useMemo(() => {
     const map = new Map<string, Array<{ categoryId: string; weightPpm: number; revision: string }>>();
     for (const b of inventory?.categoryBindings ?? []) {
@@ -1799,432 +1798,381 @@ function LiveCompositionView({
     return map;
   }, [inventory?.categoryBindings]);
 
-  const categoryChangeRows = useMemo(() => {
+  const categoryRows = useMemo(() => {
     if (!focusedCard) return [];
     const prevCatMap = new Map((prevFocusedCard?.categories ?? []).map((c) => [c.id, c]));
-    const rows = (focusedCard.categories ?? []).map((c) => {
+    const sources = focusedCard.sources ?? [];
+
+    const buildBoundLeaves = (catId: string) =>
+      sources
+        .map((s) => {
+          const allocs = bindingMap.get(`${s.terminalId}::${s.itemCode}`) ?? [];
+          if (catId === '__unclassified__') {
+            const sumPpm = allocs.reduce((acc, a) => acc + a.weightPpm, 0);
+            const remPpm = Math.max(0, 1_000_000 - sumPpm);
+            if (remPpm <= 0) return null;
+            const allocUsage = (s.usage ?? 0) * (remPpm / 1_000_000);
+            return {
+              id: `${s.terminalId}::${s.itemCode}`,
+              name: s.terminalName,
+              terminalId: s.terminalId,
+              sourceTable: s.sourceTable,
+              value: allocUsage,
+              weightPct: remPpm / 10_000,
+              valid: s.valid,
+              expected: s.expected,
+            };
+          }
+          const hit = allocs.find((a) => a.categoryId === catId);
+          if (!hit || hit.weightPpm <= 0) return null;
+          return {
+            id: `${s.terminalId}::${s.itemCode}`,
+            name: s.terminalName,
+            terminalId: s.terminalId,
+            sourceTable: s.sourceTable,
+            value: (s.usage ?? 0) * (hit.weightPpm / 1_000_000),
+            weightPct: hit.weightPpm / 10_000,
+            valid: s.valid,
+            expected: s.expected,
+          };
+        })
+        .filter((x): x is NonNullable<typeof x> => x != null && x.value > 0);
+
+    const rows: TreemapCategoryNode[] = (focusedCard.categories ?? []).map((c) => {
       const prev = prevCatMap.get(c.id);
       const shareDiffPp = c.share != null && prev?.share != null ? (c.share - prev.share) * 100 : null;
       const usageDelta = c.usage != null && prev?.usage != null ? c.usage - prev.usage : null;
       return {
         id: c.id,
         name: c.name,
-        usage: c.usage,
+        value: c.usage ?? 0,
         share: c.share,
-        prevShare: prev?.share ?? null,
         shareDiffPp,
         usageDelta,
         coverageRate: c.coverage.rate,
         isUnclassified: false,
+        children: buildBoundLeaves(c.id),
       };
     });
+
     if (focusedCard.unclassifiedUsage && focusedCard.unclassifiedUsage > 0) {
       const share = focusedCard.usage ? focusedCard.unclassifiedUsage / focusedCard.usage : null;
       const prevUnclass = prevFocusedCard?.unclassifiedUsage ?? null;
-      const prevShare =
-        prevUnclass != null && prevFocusedCard?.usage ? prevUnclass / prevFocusedCard.usage : null;
+      const prevShare = prevUnclass != null && prevFocusedCard?.usage ? prevUnclass / prevFocusedCard.usage : null;
       rows.push({
         id: '__unclassified__',
-        name: '未分项（待核查分配）',
-        usage: focusedCard.unclassifiedUsage,
+        name: '未分项（待分配）',
+        value: focusedCard.unclassifiedUsage,
         share,
-        prevShare,
         shareDiffPp: share != null && prevShare != null ? (share - prevShare) * 100 : null,
         usageDelta: prevUnclass != null ? focusedCard.unclassifiedUsage - prevUnclass : null,
         coverageRate: focusedCard.coverage.rate,
         isUnclassified: true,
+        children: buildBoundLeaves('__unclassified__'),
       });
     }
-    return rows.sort((a, b) => (a.isUnclassified ? 1 : b.isUnclassified ? -1 : (b.usage ?? 0) - (a.usage ?? 0)));
-  }, [focusedCard, prevFocusedCard]);
 
-  // Filtered sources for the selected category (or all sources of the focused energy).
-  const drilledSources = useMemo(() => {
-    if (!focusedCard) return [];
-    const list = (focusedCard.sources ?? []).map((s) => {
-      const allocs = bindingMap.get(`${s.terminalId}::${s.itemCode}`) ?? [];
-      const matched = selectedCatId ? allocs.find((a) => a.categoryId === selectedCatId) : null;
-      const totalWeightPpm = allocs.reduce((acc, a) => acc + a.weightPpm, 0);
-      return { source: s, allocs, matched, totalWeightPpm };
-    });
-    if (!selectedCatId) return list;
-    if (selectedCatId === '__unclassified__') {
-      return list.filter((item) => item.totalWeightPpm < 1_000_000);
+    return rows.sort((a, b) => (a.isUnclassified ? 1 : b.isUnclassified ? -1 : b.value - a.value));
+  }, [focusedCard, prevFocusedCard, bindingMap]);
+
+  // Three strictly server-derived analytical findings (zero fabricated claims when prior day is unavailable)
+  const topSystem = categoryRows.find((r) => !r.isUnclassified) ?? categoryRows[0] ?? null;
+  const totalDelta =
+    focusedCard?.usage != null && prevFocusedCard?.usage != null
+      ? focusedCard.usage - prevFocusedCard.usage
+      : null;
+  const positiveGrowers = categoryRows
+    .filter((r) => r.usageDelta != null && r.usageDelta > 0.01)
+    .sort((a, b) => (b.usageDelta ?? 0) - (a.usageDelta ?? 0));
+  const topGrowthDriver = positiveGrowers[0] ?? null;
+  const growthContribRatio =
+    topGrowthDriver?.usageDelta != null && totalDelta != null && totalDelta > 0
+      ? Math.min(1, topGrowthDriver.usageDelta / totalDelta)
+      : null;
+
+  const topShareMover =
+    categoryRows
+      .filter((r) => r.shareDiffPp != null)
+      .sort((a, b) => Math.abs(b.shareDiffPp ?? 0) - Math.abs(a.shareDiffPp ?? 0))[0] ?? null;
+
+  const drilledNode = drilledCatId ? categoryRows.find((r) => r.id === drilledCatId) ?? null : null;
+  const drawerNode = sourceDrawerCatId ? categoryRows.find((r) => r.id === sourceDrawerCatId) ?? null : null;
+
+  const handleTreemapClick = (catId: string | null) => {
+    if (!catId) {
+      setDrilledCatId(null);
+      return;
     }
-    return list.filter((item) => item.matched != null);
-  }, [focusedCard, bindingMap, selectedCatId]);
-
-  const selectedCatRow = selectedCatId ? categoryChangeRows.find((r) => r.id === selectedCatId) ?? null : null;
-  const carbonSummary = data.carbonSummary;
-  const carbonIncludedCards = energies.filter((e) => e.carbon?.includedInTotal && e.carbon.kgCO2e != null);
-  const waterCard = energies.find((e) => e.energy === 'water') ?? null;
-  const allSources = energies.flatMap((e) => e.sources ?? []);
-  const prevDateLabel = shiftShanghaiDate(anchorDate, -1);
+    const target = categoryRows.find((r) => r.id === catId);
+    if (!target) return;
+    if (target.children.length > 0) {
+      setDrilledCatId(catId);
+    }
+    setSourceDrawerCatId(catId);
+  };
 
   return (
-    <div className="space-y-4">
-      {/* ── 1. Compact Scope & Physical-Unit Isolation Strip (Distinct Portfolio Archetype — Zero KPI Box Repetition) ── */}
-      <div className="arco-card flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-[12px] tabular">
-        <div className="flex flex-wrap items-center gap-2.5">
-          <span className="font-semibold text-fg">{data.buildingName}</span>
-          <span className="text-muted">自然日 {anchorDate} · 较前日 {prevDateLabel} 结构变动 (pp)</span>
-          <span className="rounded-[2px] bg-fill-2 px-1.5 py-0 text-[11px] text-fg-2">
-            {energies.length} 类独立能源 · {data.categoryBindingCount} 条分项权重关系
-          </span>
-        </div>
-        <span className="text-[11px] text-muted">
-          严格按各自物理单位独立构成 100%，不跨单位直接相加；点击任意分项行即刻在底部展开计量溯源
-        </span>
-      </div>
-
-      {/* ── 2. Primary Stage: 3×2 Five-Energy Native-Unit Portfolio Matrix + Versioned Carbon Conversion Card ── */}
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 tabular">
-        {energies.map((card) => {
-          const isFocus = card.energy === focusedCard?.energy;
-          const prevCard = prevEnergyMap.get(card.energy) ?? null;
-          const prevCatMap = new Map((prevCard?.categories ?? []).map((c) => [c.id, c]));
-          const totalDeltaPct =
-            card.usage != null && prevCard?.usage != null && prevCard.usage > 0
-              ? (card.usage - prevCard.usage) / prevCard.usage
-              : null;
-          const covOk = (card.coverage.rate ?? 0) >= 0.999 && card.coverage.suspect === 0;
-          const cats = [...(card.categories ?? [])].sort((a, b) => (b.usage ?? 0) - (a.usage ?? 0));
-          const hasUnclass = Boolean(card.unclassifiedUsage && card.unclassifiedUsage > 0);
-
-          return (
-            <section
-              key={card.energy}
-              data-comp-energy={card.energy}
-              className={`arco-card flex flex-col justify-between overflow-hidden transition-colors ${
-                isFocus ? 'border-primary/60 ring-1 ring-primary/20' : ''
-              }`}
-            >
-              <div>
-                {/* Card Header */}
-                <div
-                  onClick={() => {
-                    if (!isFocus) {
-                      setFocusEnergy(card.energy);
-                      setSelectedCatId(null);
-                    }
-                  }}
-                  className={`cursor-pointer border-b border-line px-4 py-3 ${
-                    isFocus ? 'bg-primary-soft/30' : 'bg-fill-1/40 hover:bg-fill-1/70'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className={`text-[14px] font-semibold ${isFocus ? 'text-primary' : 'text-fg'}`}>
-                        {energyLabels[card.energy] ?? card.energy}
-                      </span>
-                      <span className="rounded-[2px] border border-line bg-surface px-1.5 py-0 text-[10px] text-muted">
-                        {card.unit}
-                      </span>
-                      <span
-                        className={`rounded-[2px] px-1.5 py-0 text-[10px] leading-[16px] ${
-                          covOk ? 'bg-positive-soft text-positive' : 'bg-warning-soft text-warning'
-                        }`}
-                      >
-                        覆盖 {fmtPct(card.coverage.rate)}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onNavigateClassification(card.energy);
-                      }}
-                      className="inline-flex items-center gap-0.5 text-[11px] font-medium text-primary hover:underline"
-                    >
-                      F06 趋势
-                      <ArrowRight className="h-3 w-3" aria-hidden="true" />
-                    </button>
-                  </div>
-
-                  <div className="mt-2 flex flex-wrap items-baseline justify-between gap-2">
-                    <p className="text-[24px] font-semibold leading-[30px] tracking-[-0.02em] text-fg">
-                      {fmtNum(card.usage)}
-                      <span className="ml-1 text-[12px] font-normal text-muted">{card.unit}</span>
-                    </p>
-                    <div className="flex items-center gap-2 text-[11px]">
-                      {totalDeltaPct != null && (
-                        <span
-                          className={`font-medium ${
-                            totalDeltaPct > 0.005 ? 'text-warning' : totalDeltaPct < -0.005 ? 'text-positive' : 'text-muted'
-                          }`}
-                        >
-                          较前日 {totalDeltaPct > 0 ? '+' : ''}
-                          {fmtPct(totalDeltaPct)}
-                        </span>
-                      )}
-                      <span className="text-muted">{card.meterCount} 块表</span>
-                    </div>
-                  </div>
-
-                  {/* Native-Unit 100% Proportional Stacked Bar */}
-                  <div className="mt-2.5 flex h-[10px] w-full overflow-hidden rounded-[2px] bg-fill-2">
-                    {cats.map((c, ci) => (
-                      <div
-                        key={c.id}
-                        title={`${c.name}: ${fmtNum(c.usage)} ${card.unit} (${fmtPct(c.share)})`}
-                        style={{
-                          width: `${Math.max(2, (c.share ?? 0) * 100)}%`,
-                          backgroundColor: CHART_PALETTE[ci % (CHART_PALETTE.length - 1)],
-                        }}
-                      />
-                    ))}
-                    {hasUnclass && card.usage ? (
-                      <div
-                        title={`未分项: ${fmtNum(card.unclassifiedUsage)} ${card.unit}`}
-                        style={{
-                          width: `${Math.max(2, ((card.unclassifiedUsage ?? 0) / card.usage) * 100)}%`,
-                          backgroundColor: '#C9CDD4',
-                        }}
-                      />
-                    ) : null}
-                  </div>
-                </div>
-
-                {/* Clickable Category Share & D-1 Δpp Rows */}
-                <div className="divide-y divide-line px-2 py-1 text-[12px]">
-                  {cats.map((c, ci) => {
-                    const prevC = prevCatMap.get(c.id);
-                    const diffPp = c.share != null && prevC?.share != null ? (c.share - prevC.share) * 100 : null;
-                    const rowSel = isFocus && selectedCatId === c.id;
-                    return (
-                      <button
-                        key={c.id}
-                        type="button"
-                        onClick={() => {
-                          if (!isFocus) {
-                            setFocusEnergy(card.energy);
-                            setSelectedCatId(c.id);
-                          } else {
-                            setSelectedCatId((cur) => (cur === c.id ? null : c.id));
-                          }
-                        }}
-                        className={`flex w-full items-center justify-between gap-2 rounded-[2px] px-2 py-2 text-left transition-colors ${
-                          rowSel ? 'bg-primary-soft/55' : 'hover:bg-fill-1/70'
-                        }`}
-                      >
-                        <span className="flex min-w-0 items-center gap-2">
-                          <span
-                            className="size-2 shrink-0 rounded-full"
-                            style={{ backgroundColor: CHART_PALETTE[ci % (CHART_PALETTE.length - 1)] }}
-                          />
-                          <span className="truncate font-medium text-fg">{c.name}</span>
-                        </span>
-                        <span className="flex shrink-0 items-center gap-2.5 text-[11px]">
-                          <span className="font-semibold text-fg">{fmtNum(c.usage)}</span>
-                          <span className="w-11 text-right text-fg-2">{fmtPct(c.share)}</span>
-                          <span
-                            className={`w-14 text-right font-medium ${
-                              diffPp == null || Math.abs(diffPp) < 0.05
-                                ? 'text-muted'
-                                : diffPp > 0
-                                  ? 'text-warning'
-                                  : 'text-positive'
-                            }`}
-                          >
-                            {diffPp != null ? `${diffPp > 0 ? '+' : ''}${diffPp.toFixed(1)}pp` : '—'}
-                          </span>
-                        </span>
-                      </button>
-                    );
-                  })}
-
-                  {hasUnclass && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setFocusEnergy(card.energy);
-                        setSelectedCatId((cur) => (isFocus && cur === '__unclassified__' ? null : '__unclassified__'));
-                      }}
-                      className={`flex w-full items-center justify-between gap-2 rounded-[2px] px-2 py-2 text-left transition-colors ${
-                        isFocus && selectedCatId === '__unclassified__' ? 'bg-primary-soft/55' : 'hover:bg-fill-1/70'
-                      }`}
-                    >
-                      <span className="flex items-center gap-2 text-muted">
-                        <span className="size-2 shrink-0 rounded-full bg-[#C9CDD4]" />
-                        <span>未分项（待分配）</span>
-                      </span>
-                      <span className="text-[11px] font-medium text-fg-2">
-                        {fmtNum(card.unclassifiedUsage)} {card.unit}
-                      </span>
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between border-t border-line bg-fill-1/30 px-4 py-1.5 text-[11px] text-muted">
-                <span>点击分项行下钻对应计量点</span>
-                <span className={isFocus ? 'font-medium text-primary' : ''}>
-                  {isFocus ? '当前溯源能源' : '点击切换溯源'}
-                </span>
-              </div>
-            </section>
-          );
-        })}
-
-        {/* Slot #6 in the 3×2 Portfolio Matrix: Versioned Reference Carbon Conversion (Never Mixes Physical Units) */}
-        {carbonSummary && (
-          <section
-            aria-label="明确版本折碳参考构成"
-            className="arco-card flex flex-col justify-between p-4 text-[12px] tabular"
-          >
-            <div>
-              <div className="mb-2.5 flex items-start justify-between gap-2 border-b border-line pb-2.5">
-                <div>
-                  <h2 className="text-[14px] font-semibold text-fg">折碳参考构成（统一换算口径）</h2>
-                  <p className="mt-0.5 font-mono text-[11px] text-muted">
-                    规则版本：{carbonSummary.factorVersion}
-                  </p>
-                </div>
-                <span className="shrink-0 rounded-[2px] bg-warning-soft px-1.5 py-0.5 text-[10px] font-medium text-warning">
-                  模拟参考值
-                </span>
-              </div>
-
-              <div className="mb-3 flex items-baseline justify-between">
-                <span className="text-[11px] text-muted">折算参考总碳排（不含水）</span>
-                <span className="text-[22px] font-semibold text-fg">
-                  {fmtNum(carbonSummary.totalKgCO2e)}{' '}
-                  <span className="text-[11px] font-normal text-muted">kgCO₂e</span>
-                </span>
-              </div>
-
-              <div className="space-y-2">
-                {carbonIncludedCards
-                  .slice()
-                  .sort((a, b) => (b.carbon?.kgCO2e ?? 0) - (a.carbon?.kgCO2e ?? 0))
-                  .map((card, i) => {
-                    const kg = card.carbon?.kgCO2e ?? 0;
-                    const share = carbonSummary.totalKgCO2e ? kg / carbonSummary.totalKgCO2e : 0;
-                    return (
-                      <div key={`carb-${card.energy}`} className="space-y-1">
-                        <div className="flex items-center justify-between gap-2 text-[11px]">
-                          <span className="font-medium text-fg-2">
-                            {energyLabels[card.energy] ?? card.energy}
-                            <span className="ml-1 font-normal text-muted">
-                              ({card.carbon?.factor} {card.carbon?.factorUnit})
-                            </span>
-                          </span>
-                          <span className="font-semibold text-fg">
-                            {fmtNum(kg)} kg · {fmtPct(share)}
-                          </span>
-                        </div>
-                        <div className="h-[6px] w-full overflow-hidden rounded-[2px] bg-fill-2">
-                          <div
-                            className="h-full rounded-[2px]"
-                            style={{
-                              width: `${Math.max(2, share * 100)}%`,
-                              backgroundColor: CHART_PALETTE[i % (CHART_PALETTE.length - 1)],
-                            }}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })}
-              </div>
-
-              {waterCard && (
-                <div className="mt-3 flex items-center justify-between rounded-[2px] border border-dashed border-line bg-fill-1/50 px-2.5 py-1.5 text-[11px] text-fg-2">
-                  <span>水资源消费单列（不计入能源碳排）</span>
-                  <span className="font-semibold text-fg">
-                    {fmtNum(waterCard.usage)} {waterCard.unit}
-                  </span>
-                </div>
-              )}
-            </div>
-
-            <p className="mt-2.5 border-t border-line pt-2 text-[11px] leading-relaxed text-muted">
-              {carbonSummary.disclaimer}
-            </p>
-          </section>
-        )}
-      </div>
-
-      {/* ── 3. Inline Focused Energy / Category Metering Source Evidence Bar ── */}
-      {focusedCard && (
-        <section aria-label="分类下钻与计量来源" className="arco-card p-5 text-[12px] tabular">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3">
-            <div className="flex flex-wrap items-center gap-2.5">
-              <span className="rounded-[2px] bg-primary-soft px-2 py-0.5 text-[11px] font-medium text-primary">
-                {focusedLabel}计量溯源
-              </span>
-              <h2 className="text-[14px] font-semibold text-fg">
-                {selectedCatRow ? `${selectedCatRow.name}` : `全部已关联计量点（${drilledSources.length} 块）`}
-              </h2>
-              {selectedCatRow && (
-                <span className="text-[12px] text-muted">
-                  分项实测 <strong className="text-fg">{fmtNum(selectedCatRow.usage)} {focusedCard.unit}</strong>
-                  {' · '}占 {focusedLabel} {fmtPct(selectedCatRow.share)}
-                  {selectedCatRow.shareDiffPp != null
-                    ? ` · 较前日 ${selectedCatRow.shareDiffPp > 0 ? '+' : ''}${selectedCatRow.shareDiffPp.toFixed(1)} pp`
-                    : ''}
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-2">
-              {selectedCatId && (
-                <button
-                  type="button"
-                  onClick={() => setSelectedCatId(null)}
-                  className="rounded-[2px] border border-line px-2.5 py-1 text-[11px] text-fg-2 hover:bg-fill-1"
-                >
-                  查看{focusedLabel}全部表计
-                </button>
-              )}
+    <div className="space-y-3">
+      {/* Main Product Workspace: Interactive Treemap (Left 8/9 cols) + Concise 3-Finding Insights (Right 4/3 cols) */}
+      <div className="grid items-stretch gap-4 lg:grid-cols-12">
+        <section aria-label="单一能源分项构成 Treemap" className="arco-card flex flex-col p-5 lg:col-span-8 xl:col-span-9">
+          <div className="mb-3.5 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2 text-[13px] tabular">
               <button
                 type="button"
-                onClick={() => onNavigateClassification(focusedCard.energy)}
-                className="inline-flex items-center gap-1 rounded-[2px] border border-primary/35 bg-primary-soft/50 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary-soft"
+                onClick={() => setDrilledCatId(null)}
+                className={`font-semibold transition-colors ${
+                  drilledNode ? 'text-primary hover:underline' : 'text-fg'
+                }`}
               >
-                前往 F06 深度趋势分析
-                <ArrowRight className="h-3 w-3" aria-hidden="true" />
+                {data.buildingName} · {focusedLabel}分项构成
               </button>
+              {drilledNode && (
+                <>
+                  <span className="text-muted">/</span>
+                  <span className="font-semibold text-fg">{drilledNode.name}（已绑定计量点）</span>
+                </>
+              )}
+              <span className="rounded-[2px] bg-fill-2 px-1.5 py-0 text-[11px] font-medium text-fg-2">
+                {fmtNum(focusedCard?.usage)} {focusedCard?.unit}
+              </span>
+              <span className="text-[11px] text-muted">
+                覆盖 {fmtPct(focusedCard?.coverage.rate)} · 自然日 {anchorDate}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2 text-[11px]">
+              {drilledNode && (
+                <button
+                  type="button"
+                  data-treemap-back
+                  onClick={() => setDrilledCatId(null)}
+                  className="rounded-[2px] border border-line bg-surface px-2.5 py-1 font-medium text-fg-2 hover:bg-fill-1"
+                >
+                  返回全部分项
+                </button>
+              )}
+              <span className="text-muted">单一物理单位 ({focusedCard?.unit}) 独立构成 · 点击系统块下钻</span>
             </div>
           </div>
 
-          {drilledSources.length === 0 ? (
-            <p className="rounded-[4px] bg-fill-1/50 px-3 py-3 text-[11px] text-muted">
-              当前分项暂无匹配的已绑定计量点，请在配置中心核查分类权重绑定。
-            </p>
-          ) : (
-            <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {drilledSources.map(({ source, matched, totalWeightPpm }) => {
-                const weightPct = matched ? matched.weightPpm / 10000 : totalWeightPpm / 10000;
-                return (
-                  <div
-                    key={`${source.terminalId}-${source.itemCode}`}
-                    className="rounded-[4px] border border-line bg-fill-1/30 px-3 py-2.5"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="truncate font-medium text-fg">{source.terminalName}</span>
-                      <span className="shrink-0 font-semibold text-fg">
-                        {fmtNum(source.usage)} {source.unit}
-                      </span>
-                    </div>
-                    <div className="mt-1 flex flex-wrap items-center justify-between gap-1 text-[11px] text-muted">
-                      <span className="font-mono">{source.terminalId} · {source.sourceTable}</span>
-                      <span>
-                        {matched
-                          ? `权重 ${weightPct.toFixed(0)}%`
-                          : totalWeightPpm > 0
-                            ? `总绑定 ${weightPct.toFixed(0)}%`
-                            : '未绑定'}
-                        {' · '}有效 {source.valid}/{source.expected}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+          <div className="flex-1">
+            <EnergyTreemapChart
+              nodes={categoryRows}
+              unit={focusedCard?.unit ?? ''}
+              energyLabel={focusedLabel}
+              focusedCategoryId={drilledCatId}
+              onSelectCategory={handleTreemapClick}
+              height={520}
+            />
+          </div>
         </section>
-      )}
 
-      <SourceTraceTable sources={allSources} />
+        {/* Right Streamlined Analytical Insights (Strictly 3 Findings — Zero KPI Grid / Carbon Wall / Bottom Table) */}
+        <aside aria-label="构成变化核心发现" className="arco-card flex flex-col justify-between p-5 lg:col-span-4 xl:col-span-3 tabular">
+          <div className="space-y-4">
+            <div className="border-b border-line pb-2.5">
+              <h2 className="text-[14px] font-semibold text-fg">分析发现</h2>
+              <p className="mt-0.5 text-[11px] text-muted">
+                基于 {anchorDate} 与前一日 {prevDateLabel} 实测构成比对
+              </p>
+            </div>
+
+            {/* Finding 1: Dominant System */}
+            <div className="rounded-[4px] border border-line bg-fill-1/35 p-3.5">
+              <div className="flex items-center justify-between text-[11px] text-muted">
+                <span>最大用能系统</span>
+                {topSystem?.share != null && (
+                  <span className="font-semibold text-primary">占 {fmtPct(topSystem.share)}</span>
+                )}
+              </div>
+              <p className="mt-1.5 text-[15px] font-semibold text-fg">{topSystem?.name ?? '—'}</p>
+              <p className="mt-1 text-[12px] text-fg-2">
+                {topSystem ? `${fmtNum(topSystem.value)} ${focusedCard?.unit}` : '暂无实测分项'}
+              </p>
+              {topSystem && (
+                <button
+                  type="button"
+                  onClick={() => setSourceDrawerCatId(topSystem.id)}
+                  className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline"
+                >
+                  查看计量来源
+                  <ArrowRight className="h-3 w-3" aria-hidden="true" />
+                </button>
+              )}
+            </div>
+
+            {/* Finding 2: Top Growth Contributor */}
+            <div className="rounded-[4px] border border-line bg-fill-1/35 p-3.5">
+              <div className="flex items-center justify-between text-[11px] text-muted">
+                <span>增长贡献最大分项</span>
+                {growthContribRatio != null && (
+                  <span className="font-medium text-warning">贡献 {fmtPct(growthContribRatio)}</span>
+                )}
+              </div>
+              {!prevFocusedCard ? (
+                <p className="mt-1.5 text-[12px] text-muted">暂无可比前日数据，不输出增长归因</p>
+              ) : topGrowthDriver ? (
+                <>
+                  <p className="mt-1.5 text-[15px] font-semibold text-fg">{topGrowthDriver.name}</p>
+                  <p className="mt-1 text-[12px] font-medium text-negative">
+                    较前日 +{fmtNum(topGrowthDriver.usageDelta)} {focusedCard?.unit}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setSourceDrawerCatId(topGrowthDriver.id)}
+                    className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline"
+                  >
+                    下钻增长计量来源
+                    <ArrowRight className="h-3 w-3" aria-hidden="true" />
+                  </button>
+                </>
+              ) : (
+                <p className="mt-1.5 text-[12px] text-positive">
+                  较前日整体下降或持平，无明显正向增长分项
+                </p>
+              )}
+            </div>
+
+            {/* Finding 3: Largest Structural Share Shift (pp) */}
+            <div className="rounded-[4px] border border-line bg-fill-1/35 p-3.5">
+              <div className="flex items-center justify-between text-[11px] text-muted">
+                <span>结构占比变化最大分项</span>
+                <span className="text-[10px]">单位：百分点</span>
+              </div>
+              {topShareMover && topShareMover.shareDiffPp != null ? (
+                <>
+                  <p className="mt-1.5 text-[15px] font-semibold text-fg">{topShareMover.name}</p>
+                  <p
+                    className={`mt-1 text-[14px] font-semibold ${
+                      topShareMover.shareDiffPp > 0 ? 'text-warning' : topShareMover.shareDiffPp < 0 ? 'text-positive' : 'text-fg-2'
+                    }`}
+                  >
+                    {topShareMover.shareDiffPp > 0 ? '+' : ''}
+                    {topShareMover.shareDiffPp.toFixed(1)} pp
+                    <span className="ml-1.5 text-[11px] font-normal text-muted">
+                      （现占 {fmtPct(topShareMover.share)}）
+                    </span>
+                  </p>
+                  <button
+                    type="button"
+                    data-f02-drill-mover
+                    onClick={() => setSourceDrawerCatId(topShareMover.id)}
+                    className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline"
+                  >
+                    从此分项下钻计量来源
+                    <ArrowRight className="h-3 w-3" aria-hidden="true" />
+                  </button>
+                </>
+              ) : (
+                <p className="mt-1.5 text-[12px] text-muted">暂无可比前日占比数据</p>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-4 border-t border-line pt-3">
+            <button
+              type="button"
+              onClick={() => onNavigateClassification(focusedCard?.energy ?? selectedEnergy)}
+              className="inline-flex w-full items-center justify-between rounded-[4px] border border-line bg-surface px-3 py-2 text-[12px] font-medium text-fg-2 hover:bg-fill-1 hover:text-primary"
+            >
+              <span>在 F06 查看深层分类树与权重表</span>
+              <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          </div>
+        </aside>
+      </div>
+
+      {/* On-Demand Right Slide-Over Metering Source Drawer */}
+      {drawerNode && focusedCard && createPortal(
+        <div className="fixed inset-0 z-50 flex justify-end bg-slate-900/20" onClick={() => setSourceDrawerCatId(null)}>
+        <div
+          role="dialog"
+          aria-label="分项计量来源详情"
+          data-f02-source-drawer
+          onClick={(e) => e.stopPropagation()}
+          className="flex h-full w-full max-w-[420px] flex-col border-l border-line bg-surface shadow-2xl tabular"
+        >
+          <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
+            <div>
+              <span className="text-[11px] text-muted">{focusedLabel} · 分项计量溯源</span>
+              <h3 className="mt-0.5 text-[15px] font-semibold text-fg">{drawerNode.name}</h3>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSourceDrawerCatId(null)}
+              aria-label="关闭计量来源抽屉"
+              className="rounded-[4px] p-1 text-muted hover:bg-fill-1 hover:text-fg"
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
+
+          <div className="flex-1 space-y-4 overflow-y-auto p-5 text-[12px]">
+            <div className="grid grid-cols-2 gap-3 rounded-[4px] bg-fill-1/60 p-3.5">
+              <div>
+                <span className="text-[11px] text-muted">分项实测</span>
+                <p className="mt-0.5 text-[16px] font-semibold text-fg">
+                  {fmtNum(drawerNode.value)} {focusedCard.unit}
+                </p>
+              </div>
+              <div>
+                <span className="text-[11px] text-muted">占比 / 较前日变动</span>
+                <p className="mt-0.5 text-[14px] font-semibold text-fg">
+                  {fmtPct(drawerNode.share)}
+                  {drawerNode.shareDiffPp != null && (
+                    <span className={`ml-1.5 text-[12px] ${drawerNode.shareDiffPp > 0 ? 'text-warning' : 'text-positive'}`}>
+                      ({drawerNode.shareDiffPp > 0 ? '+' : ''}{drawerNode.shareDiffPp.toFixed(1)} pp)
+                    </span>
+                  )}
+                </p>
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-2 flex items-center justify-between text-[11px] text-muted">
+                <span className="font-medium text-fg-2">真实绑定计量点（{drawerNode.children.length} 块）</span>
+                <span>按已确认分类权重分摊</span>
+              </div>
+              {drawerNode.children.length === 0 ? (
+                <p className="rounded-[4px] border border-dashed border-line bg-fill-1/40 px-3 py-4 text-center text-[11px] text-muted">
+                  当前分项无已确认的下级计量点绑定关系，不可继续下钻。
+                </p>
+              ) : (
+                <ul className="divide-y divide-line rounded-[4px] border border-line">
+                  {drawerNode.children.map((leaf) => (
+                    <li key={leaf.id} className="px-3.5 py-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium text-fg">{leaf.name}</span>
+                        <span className="font-semibold text-fg">
+                          {fmtNum(leaf.value)} {focusedCard.unit}
+                        </span>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between text-[11px] text-muted">
+                        <span className="font-mono">{leaf.terminalId} · {leaf.sourceTable}</span>
+                        <span>权重 {leaf.weightPct.toFixed(0)}% · 有效 {leaf.valid}/{leaf.expected}</span>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+
+          <div className="border-t border-line px-5 py-3">
+            <button
+              type="button"
+              onClick={() => onNavigateClassification(focusedCard.energy)}
+              className="inline-flex w-full items-center justify-center gap-1.5 rounded-[4px] bg-primary px-4 py-2 text-[12px] font-medium text-white hover:bg-primary/90"
+            >
+              <span>前往 F06 查看完整分类树与多日趋势</span>
+              <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }
@@ -3106,7 +3054,6 @@ function LiveRealtimeTrendView({
 function LiveTargetSummaryView({
   data,
   token,
-  inventory,
   onChangeEnergy,
   onOpenF14,
 }: {
@@ -3225,17 +3172,9 @@ function LiveTargetSummaryView({
     remainingMonthCount,
   ]);
 
-  const targetConfig = useMemo(
-    () =>
-      (inventory?.targets ?? []).find(
-        (t) => t.objectId === data.buildingId && t.energy === data.energy && t.year === data.year,
-      ) ?? null,
-    [inventory?.targets, data.buildingId, data.energy, data.year],
-  );
-
   return (
     <div className="space-y-4">
-      {/* ── 1. Executive Target Risk Posture Banner + 4-Col Risk KPIs ── */}
+      {/* ── 1. Compact Target Risk Posture Strip ── */}
       <section aria-label="年度目标执行风险摘要" className="arco-card overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line bg-fill-1/50 px-5 py-2.5 text-[12px] tabular">
           <div className="flex flex-wrap items-center gap-2">
@@ -3260,82 +3199,56 @@ function LiveTargetSummaryView({
           </button>
         </div>
 
-        <div className="grid divide-y divide-line sm:grid-cols-2 lg:grid-cols-4 lg:divide-y-0 lg:divide-x tabular">
-          <div className="p-4 lg:p-5">
-            <p className="text-[12px] font-medium text-fg-2">{data.year} 年度总目标</p>
-            <p className="mt-2 text-[26px] font-semibold leading-[32px] tracking-[-0.02em] text-fg">
-              {fmtNum(annualTarget)}
-              <span className="ml-1 text-[12px] font-normal text-muted">{data.unit}</span>
-            </p>
-            <p className="mt-1.5 text-[11px] text-muted">
-              {data.targetMethod === 'weighted' ? '季节权重分解' : '月度线性均分'}
-              {targetConfig ? ` · 规则 ${targetConfig.revision}` : ''}
-            </p>
-          </div>
-
-          <div className="p-4 lg:p-5">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">已完成月份实际用量</span>
-              <span className="text-[11px] text-muted">{completedComparable.length}/12 月可比</span>
+        <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 px-5 py-3 text-[12px] tabular">
+          <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2">
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-muted">{data.year} 年度目标</span>
+              <strong className="text-[16px] font-semibold text-fg">{fmtNum(annualTarget)}</strong>
+              <span className="text-[11px] text-muted">{data.unit}</span>
             </div>
-            <p className="mt-2 text-[26px] font-semibold leading-[32px] tracking-[-0.02em] text-fg">
-              {fmtNum(completedUsageSum)}
-              <span className="ml-1 text-[12px] font-normal text-muted">{data.unit}</span>
-            </p>
-            <p className="mt-1.5 text-[11px] text-muted">
-              {incompleteOrLowCov.length > 0
-                ? `${incompleteOrLowCov.length} 个月未完结/低覆盖，不计入正式完成率`
-                : '全年 12 个月均已完整入账'}
-            </p>
-          </div>
-
-          <div className="p-4 lg:p-5">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">同期执行进度与节奏差</span>
+            <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-muted">已完结实测</span>
+              <strong className="text-[16px] font-semibold text-fg">{fmtNum(completedUsageSum)}</strong>
+              <span className="text-[11px] text-muted">{data.unit}（{completedComparable.length}/12 月可比）</span>
+            </div>
+            <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-muted">占全年配额</span>
+              <strong className="text-[16px] font-semibold text-primary">{fmtPct(ytdAnnualRatio)}</strong>
               {completedPaceRatio != null && (
                 <span
-                  className={`rounded-[2px] px-1.5 py-0 text-[10px] font-medium ${
+                  className={`rounded-[2px] px-1.5 py-0 text-[11px] font-medium ${
                     completedPaceRatio > 1 ? 'bg-negative-soft text-negative' : 'bg-positive-soft text-positive'
                   }`}
                 >
-                  {completedPaceRatio > 1 ? '超前消耗' : '进度受控'}
+                  {completedPaceRatio > 1 ? '超前消耗' : '进度受控'} {fmtPct(completedPaceRatio)}
                 </span>
               )}
             </div>
-            <p className="mt-2 text-[26px] font-semibold leading-[32px] tracking-[-0.02em] text-primary">
-              {fmtPct(ytdAnnualRatio)}
-              <span className="ml-1.5 text-[11px] font-normal text-muted">占全年配额</span>
-            </p>
-            <p className="mt-1.5 text-[11px] text-muted">
-              {completedPaceRatio != null
-                ? `较同期累计目标 ${fmtPct(completedPaceRatio)}（${
-                    completedUsageSum! > completedTargetSum! ? '+' : ''
-                  }${fmtNum(completedUsageSum! - completedTargetSum!)} ${data.unit}）`
-                : '待补齐可比实测月份'}
-            </p>
-          </div>
-
-          <div className="bg-fill-1/35 p-4 lg:p-5">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">剩余可用额度与月均承压</span>
-              {remainingMonthCount > 0 && (
-                <span className="text-[11px] text-muted">余 {remainingMonthCount} 月</span>
+            <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-muted">剩余可用</span>
+              <strong
+                className={`text-[16px] font-semibold ${
+                  remainingAnnual != null && remainingAnnual < 0 ? 'text-negative' : 'text-fg'
+                }`}
+              >
+                {fmtNum(remainingAnnual)}
+              </strong>
+              {remainingAnnual != null && <span className="text-[11px] text-muted">{data.unit}</span>}
+              {avgRemainingAllowance != null && avgMonthlyActual != null && (
+                <span className="text-[11px] text-muted">
+                  （余 {remainingMonthCount} 月 · 均可用 {fmtNum(avgRemainingAllowance)}）
+                </span>
               )}
             </div>
-            <p
-              className={`mt-2 text-[26px] font-semibold leading-[32px] tracking-[-0.02em] ${
-                remainingAnnual != null && remainingAnnual < 0 ? 'text-negative' : 'text-fg'
-              }`}
-            >
-              {fmtNum(remainingAnnual)}
-              {remainingAnnual != null && <span className="ml-1 text-[12px] font-normal text-muted">{data.unit}</span>}
-            </p>
-            <p className="mt-1.5 text-[11px] text-muted">
-              {avgRemainingAllowance != null && avgMonthlyActual != null
-                ? `余月均可用 ${fmtNum(avgRemainingAllowance)} vs 实测月均 ${fmtNum(avgMonthlyActual)}`
-                : '全年周期已结束或无目标配置'}
-            </p>
           </div>
+          {incompleteOrLowCov.length > 0 && (
+            <span className="text-[11px] text-muted">
+              {incompleteOrLowCov.length} 个月未完结/低覆盖不计入正式完成率
+            </span>
+          )}
         </div>
       </section>
 
@@ -3563,9 +3476,6 @@ function LiveTargetsView({
   const completedComparable = months.filter(
     (m) => m.status === 'comparable' && m.usage != null && m.target != null && (m.coverage.rate ?? 0) >= 0.9,
   );
-  const incompleteOrLowCov = months.filter(
-    (m) => m.status !== 'comparable' || m.usage == null || (m.coverage.rate ?? 0) < 0.9,
-  );
   const completedUsageSum =
     completedComparable.length > 0 ? completedComparable.reduce((s, m) => s + (m.usage ?? 0), 0) : null;
   const completedTargetSum =
@@ -3635,41 +3545,25 @@ function LiveTargetsView({
           </span>
         </div>
 
-        <div className="grid divide-y divide-line sm:grid-cols-2 lg:grid-cols-4 lg:divide-y-0 lg:divide-x tabular">
-          <div className="p-4 lg:p-5">
-            <p className="text-[12px] font-medium text-fg-2">{data.year} 年度总目标</p>
-            <p className="mt-2 text-[26px] font-semibold leading-[32px] tracking-[-0.02em] text-fg">
-              {fmtNum(annualTarget)}
-              <span className="ml-1 text-[12px] font-normal text-muted">{data.unit}</span>
-            </p>
-            <p className="mt-1.5 text-[11px] text-muted">
-              {weightMin != null && weightMax != null
-                ? isWeighted
-                  ? `月权重区间 ${fmtPct(weightMin)} ~ ${fmtPct(weightMax)}`
-                  : `12 个月等权均分（每月 ${fmtPct(weightMin)}）`
-                : '尚未配置年度分期目标'}
-            </p>
-          </div>
-
-          <div className="p-4 lg:p-5">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">已完结期累计实测</span>
-              <span className="text-[11px] text-muted">{completedComparable.length}/12 月可比</span>
+        <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 px-5 py-3 text-[12px] tabular">
+          <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2">
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-muted">{data.year} 年度目标</span>
+              <strong className="text-[16px] font-semibold text-fg">{fmtNum(annualTarget)}</strong>
+              <span className="text-[11px] text-muted">{data.unit}</span>
             </div>
-            <p className="mt-2 text-[26px] font-semibold leading-[32px] tracking-[-0.02em] text-fg">
-              {fmtNum(data.annual.usage ?? completedUsageSum)}
-              <span className="ml-1 text-[12px] font-normal text-muted">{data.unit}</span>
-            </p>
-            <p className="mt-1.5 text-[11px] text-muted">
-              {data.annual.status === 'comparable'
-                ? `全年正式完成率 ${fmtPct(data.annual.ratio)}`
-                : `${incompleteOrLowCov.length} 个月未结束/缺测，暂不生成全年正式完成率`}
-            </p>
-          </div>
-
-          <div className="p-4 lg:p-5">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">已完结期执行比</span>
+            <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-muted">已完结实测</span>
+              <strong className="text-[16px] font-semibold text-fg">{fmtNum(data.annual.usage ?? completedUsageSum)}</strong>
+              <span className="text-[11px] text-muted">{data.unit}（{completedComparable.length}/12 月可比）</span>
+            </div>
+            <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-muted">执行比</span>
+              <strong className="text-[16px] font-semibold text-primary">
+                {fmtPct(data.annual.status === 'comparable' ? data.annual.ratio : completedExecRatio)}
+              </strong>
               <span
                 className={`rounded-[2px] px-1.5 py-0 text-[11px] leading-[18px] ${
                   overTargetCount > 0 ? 'bg-warning-soft text-warning' : 'bg-positive-soft text-positive'
@@ -3678,32 +3572,24 @@ function LiveTargetsView({
                 {overTargetCount > 0 ? `超标 ${overTargetCount} 个月` : '全部受控'}
               </span>
             </div>
-            <p className="mt-2 text-[26px] font-semibold leading-[32px] tracking-[-0.02em] text-primary">
-              {fmtPct(data.annual.status === 'comparable' ? data.annual.ratio : completedExecRatio)}
-            </p>
-            <p className="mt-1.5 text-[11px] text-muted">
-              {completedTargetSum != null
-                ? `同期累计目标 ${fmtNum(completedTargetSum)} ${data.unit}`
-                : statusLabels[data.annual.status] ?? data.annual.status}
-            </p>
+            <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-muted">年度剩余</span>
+              <strong
+                className={`text-[16px] font-semibold ${
+                  remainingAnnual != null && remainingAnnual < 0 ? 'text-negative' : 'text-fg'
+                }`}
+              >
+                {fmtNum(remainingAnnual)}
+              </strong>
+              {remainingAnnual != null && <span className="text-[11px] text-muted">{data.unit}</span>}
+            </div>
           </div>
-
-          <div className="bg-fill-1/35 p-4 lg:p-5">
-            <p className="text-[12px] font-medium text-fg-2">年度剩余可用额度</p>
-            <p
-              className={`mt-2 text-[26px] font-semibold leading-[32px] tracking-[-0.02em] ${
-                remainingAnnual != null && remainingAnnual < 0 ? 'text-negative' : 'text-fg'
-              }`}
-            >
-              {fmtNum(remainingAnnual)}
-              {remainingAnnual != null && <span className="ml-1 text-[12px] font-normal text-muted">{data.unit}</span>}
-            </p>
-            <p className="mt-1.5 text-[11px] text-muted">
-              {remainingAnnual != null && annualTarget && annualTarget > 0
-                ? `占全年配额 ${fmtPct(remainingAnnual / annualTarget)}`
-                : '待补齐完整月度实测'}
-            </p>
-          </div>
+          {weightMin != null && weightMax != null && (
+            <span className="text-[11px] text-muted">
+              {isWeighted ? `月权重 ${fmtPct(weightMin)}–${fmtPct(weightMax)}` : `等权均分 ${fmtPct(weightMin)}/月`}
+            </span>
+          )}
         </div>
         {data.message && (
           <p className="border-t border-line bg-warning-soft/50 px-5 py-2 text-[12px] text-warning">{data.message}</p>
@@ -4112,73 +3998,47 @@ function LiveClassificationView({
 
   return (
     <div className="space-y-4">
-      {/* ── 1. Executive Summary Band (Parent Summary vs Sub-Items, Unclassified, Carbon & Rule Version) ── */}
-      <section aria-label="分类分项汇总摘要" className="arco-card overflow-hidden">
-        <div className="grid divide-y divide-line sm:grid-cols-2 lg:grid-cols-4 lg:divide-y-0 lg:divide-x tabular">
-          <div className="p-4 lg:p-5">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">
-                {energyLabels[data.energy] ?? data.energy}父级正式总计
-              </span>
-              <span className="rounded-[2px] bg-primary-soft px-1.5 py-0 text-[11px] leading-[18px] text-primary">
+      {/* ── 1. Compact Classification Context Strip (Parent vs Sub-Items, Unclassified Check, No 4-KPI Wall) ── */}
+      <section aria-label="分类分项汇总摘要" className="arco-card px-5 py-3 tabular">
+        <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 text-[12px]">
+          <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1.5">
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-muted">{energyLabels[data.energy] ?? data.energy}父级总计</span>
+              <strong className="text-[16px] font-semibold text-fg">{fmtNum(data.totalUsage)}</strong>
+              <span className="text-[11px] text-muted">{data.unit}</span>
+              <span className="rounded-[2px] bg-primary-soft px-1.5 py-0 text-[11px] text-primary">
                 覆盖 {fmtPct(data.totalCoverage.rate)}
               </span>
             </div>
-            <p className="mt-2 text-[26px] font-semibold leading-[32px] tracking-[-0.02em] text-fg">
-              {fmtNum(data.totalUsage)}
-              <span className="ml-1 text-[12px] font-normal text-muted">{data.unit}</span>
-            </p>
-            <p className="mt-1.5 text-[11px] text-muted">
-              {data.buildingName} · {anchorDate} · 父子层级分开列示，严禁重复累计
-            </p>
-          </div>
-
-          <div className="p-4 lg:p-5">
-            <div className="flex items-center justify-between gap-2 text-[12px]">
-              <span className="font-medium text-fg-2">已分项覆盖 &amp; 未分项</span>
+            <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-muted">已分项</span>
+              <strong className="font-semibold text-fg">{fmtPct(classifiedShare)}</strong>
+              <span className="text-[11px] text-muted">（{fmtNum(classifiedSum)} {data.unit}）</span>
               <span className={`text-[11px] ${hasUnclassified ? 'font-medium text-warning' : 'text-positive'}`}>
-                {hasUnclassified ? '存在未分项' : '100% 已分项'}
+                {hasUnclassified ? `未分项 ${fmtNum(data.unclassifiedUsage ?? 0)} ${data.unit}` : '100% 已分项'}
               </span>
             </div>
-            <p className="mt-2 text-[24px] font-semibold leading-[32px] tracking-[-0.02em] text-fg">
-              {fmtPct(classifiedShare)}
-              <span className="ml-1.5 text-[12px] font-normal text-muted">
-                已分项 {fmtNum(classifiedSum)} {data.unit}
-              </span>
-            </p>
-            <p className={`mt-1.5 text-[11px] ${hasUnclassified ? 'font-medium text-warning' : 'text-muted'}`}>
-              未分项用量：{fmtNum(data.unclassifiedUsage ?? 0)} {data.unit}
-            </p>
+            {topCategory && (
+              <>
+                <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+                <div className="flex items-baseline gap-1.5">
+                  <span className="text-muted">最大子分项</span>
+                  <strong className="font-semibold text-fg">{topCategory.name}</strong>
+                  <span className="font-medium text-primary">{fmtPct(topCategory.share)}</span>
+                </div>
+              </>
+            )}
           </div>
-
-          <div className="p-4 lg:p-5">
-            <p className="text-[12px] font-medium text-fg-2">最大用能子分项</p>
-            <p className="mt-2 truncate text-[22px] font-semibold leading-[32px] tracking-[-0.02em] text-fg">
-              {topCategory ? topCategory.name : '—'}
-              {topCategory?.share != null && (
-                <span className="ml-1.5 text-[14px] font-medium text-primary">{fmtPct(topCategory.share)}</span>
-              )}
-            </p>
-            <p className="mt-1.5 text-[11px] text-muted">
-              {topCategory ? `${fmtNum(topCategory.usage)} ${data.unit} · 共 ${categories.length} 个正式子分项` : '暂无子分项'}
-            </p>
-          </div>
-
-          <div className="bg-fill-1/35 p-4 lg:p-5">
-            <p className="text-[12px] font-medium text-fg-2">模拟参考碳排 &amp; 分类口径</p>
-            <p className="mt-2 text-[22px] font-semibold leading-[32px] tracking-[-0.02em] text-fg">
-              {data.carbon?.includedInTotal ? (
-                <>
-                  {fmtNum(data.carbon.kgCO2e)}
-                  <span className="ml-1 text-[11px] font-normal text-muted">kgCO₂e</span>
-                </>
-              ) : (
-                <span className="text-[16px] font-medium text-fg-2">水资源单列不计碳排</span>
-              )}
-            </p>
-            <p className="mt-1.5 truncate text-[11px] text-muted">
-              规则 {data.ruleVersion} · 分类树 {data.classificationRuleVersion}
-            </p>
+          <div className="flex flex-wrap items-center gap-3 text-[11px] text-muted">
+            {data.carbon?.includedInTotal ? (
+              <span>参考碳排 {fmtNum(data.carbon.kgCO2e)} kgCO₂e</span>
+            ) : (
+              <span>水资源单列不计碳排</span>
+            )}
+            <span className="font-mono">
+              {data.buildingName} · {anchorDate} · {data.classificationRuleVersion}
+            </span>
           </div>
         </div>
       </section>
@@ -5269,103 +5129,258 @@ const balanceStatusLabels: Record<string, string> = {
 };
 
 function LiveBalanceView({ data }: { data: BalanceData }) {
+  const [zoom, setZoom] = useState<number>(1);
+  const [selectedNode, setSelectedNode] = useState<SankeyMeterNodeMeta | null>(null);
+
+  useEffect(() => {
+    setSelectedNode(null);
+    setZoom(1);
+  }, [data.buildingId, data.energy, data.from]);
+
   if (!data.topologyConfigured || !data.report) {
     return (
-      <section className="rounded-[4px] border border-line bg-surface p-6">
-        <h2 className="text-sm font-semibold text-fg">总分表物理拓扑待配置</h2>
-        <p className="mt-1.5 text-xs text-muted">{data.message}</p>
+      <section
+        aria-label="未配置物理拓扑提示"
+        className="arco-card flex min-h-[480px] flex-col items-center justify-center gap-2 p-8 text-center"
+      >
+        <h2 className="text-[15px] font-semibold text-fg">当前对象尚未配置物理总分表拓扑</h2>
+        <p className="max-w-md text-[12px] leading-relaxed text-muted">
+          {data.message || '未检测到已确认的父总表与直接分表绑定关系，系统严禁生成虚假能源流向。'}
+        </p>
       </section>
     );
   }
+
   const rep = data.report;
   const unit = rep.Unit;
+  const parentUsage = rep.Parent?.Usage ?? null;
   const highImbalance = rep.DifferenceRate != null && Math.abs(rep.DifferenceRate) >= 0.05;
 
+  const parentMeta: SankeyMeterNodeMeta = {
+    id: rep.Parent
+      ? `parent::${rep.Parent.Meter.Point.Key.TerminalID}:${rep.Parent.Meter.Point.Key.ItemCode}`
+      : 'parent::main',
+    name: rep.Parent?.Meter?.Name || '父总表',
+    role: 'parent',
+    terminalId: rep.Parent?.Meter.Point.Key.TerminalID ?? '—',
+    itemCode: rep.Parent?.Meter.Point.Key.ItemCode ?? '—',
+    zone: (rep.Parent?.Meter.Zones ?? []).join(', ') || '全建筑总进线',
+    usage: parentUsage,
+    share: 1,
+    status: rep.Parent?.Status ?? rep.Status,
+    statusLabel: balanceStatusLabels[rep.Parent?.Status ?? rep.Status] ?? (rep.Parent?.Status ?? rep.Status),
+    topologyVersion: data.topologyVersion,
+    note: '物理总进线计量点，不与下级直接分表重复相加。',
+  };
+
+  const childMetas: SankeyMeterNodeMeta[] = (rep.Children ?? []).map((ch) => ({
+    id: `child::${ch.Meter.Point.Key.TerminalID}:${ch.Meter.Point.Key.ItemCode}`,
+    name: ch.Meter.Name,
+    role: 'child',
+    terminalId: ch.Meter.Point.Key.TerminalID,
+    itemCode: ch.Meter.Point.Key.ItemCode,
+    zone: (ch.Meter.Zones ?? []).join(', ') || '—',
+    usage: ch.Usage,
+    share: parentUsage && parentUsage > 0 && ch.Usage != null ? ch.Usage / parentUsage : null,
+    status: ch.Status,
+    statusLabel: balanceStatusLabels[ch.Status] ?? ch.Status,
+    topologyVersion: data.topologyVersion,
+  }));
+
+  const diffMeta: SankeyMeterNodeMeta | null =
+    rep.Difference != null && Math.abs(rep.Difference) > 0.001
+      ? {
+          id: 'diff::unallocated',
+          name: '未分配 / 待核查差额',
+          role: 'diff',
+          terminalId: 'DIFF (父总表 − 分表合计)',
+          itemCode: 'unallocated_balance_diff',
+          zone: '待核查边界',
+          usage: rep.Difference,
+          share: rep.DifferenceRate,
+          status: rep.Status,
+          statusLabel: balanceStatusLabels[rep.Status] ?? rep.Status,
+          topologyVersion: data.topologyVersion,
+          note: '按 PRD 统计口径，总分表差额标示为「未分配 / 待核查差额」，不可直接定性为线损，需排查未挂表回路、倍率或时钟对齐。',
+        }
+      : null;
+
   return (
-    <div className="space-y-4">
-      <section className="overflow-hidden rounded-[4px] border border-line bg-surface">
-        <div className="grid divide-y divide-line sm:grid-cols-2 lg:grid-cols-4 sm:divide-y-0 lg:divide-x tabular">
-          <div className="p-5">
-            <p className="text-xs text-muted">父总表用量</p>
-            <p className="mt-1.5 text-2xl font-semibold text-fg">{fmtNum(rep.Parent?.Usage)} <span className="text-xs font-normal text-muted">{unit}</span></p>
-            <p className="mt-1 text-xs text-muted">拓扑版本 {data.topologyVersion}</p>
-          </div>
-          <div className="p-5">
-            <p className="text-xs text-muted">直接分表合计（{rep.Children?.length ?? 0} 块）</p>
-            <p className="mt-1.5 text-2xl font-semibold text-fg">{fmtNum(rep.ChildrenUsage)} <span className="text-xs font-normal text-muted">{unit}</span></p>
-            <p className="mt-1 text-xs text-muted">严禁与父总表重复累计</p>
-          </div>
-          <div className="p-5">
-            <p className="text-xs text-muted">未分配 / 待核查差额</p>
-            <p className={`mt-1.5 text-2xl font-semibold ${highImbalance ? 'text-warning' : 'text-fg'}`}>
-              {fmtNum(rep.Difference)} <span className="text-xs font-normal text-muted">{unit}</span>
-            </p>
-            <p className="mt-1 text-xs text-muted">差额率：{fmtPct(rep.DifferenceRate)}</p>
-          </div>
-          <div className="p-5">
-            <p className="text-xs text-muted">平衡判定结论</p>
-            <p className={`mt-1.5 text-sm font-semibold ${highImbalance ? 'text-warning' : 'text-positive'}`}>
+    <div className="relative">
+      {/* Full-Canvas Studio Sankey Workspace (Zero 4-KPI Grid / Zero Bottom Table / Zero Boilerplate) */}
+      <section aria-label="物理能流与总分表平衡画布" className="arco-card overflow-hidden">
+        {/* Compact Canvas Toolbar: Inline Flow Telemetry + Zoom / Fit / Reset Controls */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line bg-fill-1/40 px-5 py-2.5 text-[12px] tabular">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <span className="font-semibold text-fg">
+              {data.buildingName} · {energyLabels[data.energy] ?? data.energy}物理能流 ({unit})
+            </span>
+            <span className="text-muted">
+              总表 <strong className="text-fg">{fmtNum(parentUsage)}</strong> · 分表合计{' '}
+              <strong className="text-fg">{fmtNum(rep.ChildrenUsage)}</strong> ({childMetas.length} 块)
+            </span>
+            {rep.Difference != null && (
+              <span className={highImbalance ? 'font-medium text-warning' : 'text-fg-2'}>
+                未分配差额 <strong>{fmtNum(rep.Difference)} {unit}</strong> ({fmtPct(rep.DifferenceRate)})
+              </span>
+            )}
+            <span
+              className={`rounded-[2px] px-1.5 py-0 text-[10px] font-medium leading-[18px] ${
+                rep.Status === 'balanced'
+                  ? 'bg-positive-soft text-positive'
+                  : highImbalance
+                    ? 'bg-warning-soft text-warning'
+                    : 'bg-fill-2 text-fg-2'
+              }`}
+            >
               {balanceStatusLabels[rep.Status] ?? rep.Status}
-            </p>
-            <p className="mt-1 text-xs text-muted">差额不直接定性为线损</p>
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1" role="toolbar" aria-label="能流画布视图控制">
+            <button
+              type="button"
+              data-sankey-zoom="in"
+              onClick={() => setZoom((z) => Math.min(1.4, Number((z + 0.15).toFixed(2))))}
+              title="放大视图"
+              className="inline-flex h-7 items-center gap-1 rounded-[2px] border border-line bg-surface px-2 text-[11px] text-fg-2 hover:bg-fill-1 hover:text-fg"
+            >
+              <ZoomIn className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>放大</span>
+            </button>
+            <button
+              type="button"
+              data-sankey-zoom="out"
+              onClick={() => setZoom((z) => Math.max(0.75, Number((z - 0.15).toFixed(2))))}
+              title="缩小视图"
+              className="inline-flex h-7 items-center gap-1 rounded-[2px] border border-line bg-surface px-2 text-[11px] text-fg-2 hover:bg-fill-1 hover:text-fg"
+            >
+              <ZoomOut className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>缩小</span>
+            </button>
+            <button
+              type="button"
+              data-sankey-zoom="fit"
+              onClick={() => setZoom(1)}
+              title="适应画布"
+              className="inline-flex h-7 items-center gap-1 rounded-[2px] border border-line bg-surface px-2 text-[11px] text-fg-2 hover:bg-fill-1 hover:text-fg"
+            >
+              <Maximize2 className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>适应画布</span>
+            </button>
+            <button
+              type="button"
+              data-sankey-zoom="reset"
+              onClick={() => {
+                setZoom(1);
+                setSelectedNode(null);
+              }}
+              title="重置视图与选中状态"
+              className="inline-flex h-7 items-center gap-1 rounded-[2px] border border-line bg-surface px-2 text-[11px] text-fg-2 hover:bg-fill-1 hover:text-fg"
+            >
+              <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>重置</span>
+            </button>
           </div>
         </div>
-      </section>
 
-      <section className="rounded-[4px] border border-line bg-surface p-5">
-        <h2 className="mb-3 text-sm font-semibold text-fg">{data.buildingName} · 物理总分表能流拓扑图（Sankey）</h2>
-        <EnergyFlowBalanceChart
-          parentName={rep.Parent?.Meter?.Name || '父总表'}
-          parentUsage={rep.Parent?.Usage ?? null}
-          difference={rep.Difference}
-          unit={unit}
-          childrenNodes={(rep.Children ?? []).map((ch) => ({
-            id: `${ch.Meter.Point.Key.TerminalID}:${ch.Meter.Point.Key.ItemCode}`,
-            name: ch.Meter.Name,
-            zone: (ch.Meter.Zones ?? []).join(', ') || '—',
-            usage: ch.Usage,
-          }))}
-        />
-      </section>
-
-      <CollapsibleSection title="总分表表计明细" badge={`${(rep.Children?.length ?? 0) + (rep.Parent ? 1 : 0)} 块表`}>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="border-b border-line bg-surface-2 text-muted">
-              <tr>
-                <th className="px-4 py-2">层级</th>
-                <th className="px-4 py-2">表计名称</th>
-                <th className="px-4 py-2">终端 / 项编码</th>
-                <th className="px-4 py-2">分区</th>
-                <th className="px-4 py-2 text-right">用量 ({unit})</th>
-                <th className="px-4 py-2">状态</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-line tabular">
-              {rep.Parent && (
-                <tr className="bg-surface-2/60">
-                  <td className="px-4 py-2 font-semibold text-fg">父总表</td>
-                  <td className="px-4 py-2 font-medium text-fg">{rep.Parent.Meter.Name}</td>
-                  <td className="px-4 py-2 text-muted">{rep.Parent.Meter.Point.Key.TerminalID}/{rep.Parent.Meter.Point.Key.ItemCode}</td>
-                  <td className="px-4 py-2 text-muted">{(rep.Parent.Meter.Zones ?? []).join(', ') || '—'}</td>
-                  <td className="px-4 py-2 text-right font-semibold text-fg">{fmtNum(rep.Parent.Usage)}</td>
-                  <td className="px-4 py-2 text-muted">{balanceStatusLabels[rep.Parent.Status] ?? rep.Parent.Status}</td>
-                </tr>
-              )}
-              {(rep.Children ?? []).map((ch) => (
-                <tr key={`${ch.Meter.Point.Key.TerminalID}:${ch.Meter.Point.Key.ItemCode}`}>
-                  <td className="px-4 py-2 text-muted">直接分表</td>
-                  <td className="px-4 py-2 font-medium text-fg">{ch.Meter.Name}</td>
-                  <td className="px-4 py-2 text-muted">{ch.Meter.Point.Key.TerminalID}/{ch.Meter.Point.Key.ItemCode}</td>
-                  <td className="px-4 py-2 text-muted">{(ch.Meter.Zones ?? []).join(', ') || '—'}</td>
-                  <td className="px-4 py-2 text-right text-fg">{fmtNum(ch.Usage)}</td>
-                  <td className="px-4 py-2 text-muted">{balanceStatusLabels[ch.Status] ?? ch.Status}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        {/* Dedicated Full-Space Sankey Canvas */}
+        <div className="bg-surface px-4 py-3">
+          <EnergySankeyChart
+            parentNode={parentMeta}
+            childNodes={childMetas}
+            diffNode={diffMeta}
+            unit={unit}
+            zoom={zoom}
+            selectedNodeId={selectedNode?.id ?? null}
+            onSelectNode={(node) => setSelectedNode(node)}
+            height={580}
+          />
         </div>
-      </CollapsibleSection>
+      </section>
+
+      {/* On-Demand Right Slide-Over Node Inspector Drawer */}
+      {selectedNode && createPortal(
+        <div className="fixed inset-0 z-50 flex justify-end bg-slate-900/20" onClick={() => setSelectedNode(null)}>
+        <aside
+          role="dialog"
+          aria-label="能流节点计量溯源详情"
+          data-f09-node-drawer
+          onClick={(e) => e.stopPropagation()}
+          className="flex h-full w-full max-w-[390px] flex-col border-l border-line bg-surface shadow-2xl tabular"
+        >
+          <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
+            <div>
+              <span className="rounded-[2px] bg-primary-soft px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                {selectedNode.role === 'parent' ? '父总表节点' : selectedNode.role === 'diff' ? '总分表平衡差额' : '直接分表节点'}
+              </span>
+              <h3 className="mt-1.5 text-[15px] font-semibold text-fg">{selectedNode.name}</h3>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSelectedNode(null)}
+              aria-label="关闭节点详情抽屉"
+              className="rounded-[4px] p-1 text-muted hover:bg-fill-1 hover:text-fg"
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
+
+          <div className="flex-1 space-y-4 overflow-y-auto p-5 text-[12px]">
+            <div className="grid grid-cols-2 gap-3 rounded-[4px] bg-fill-1/60 p-3.5">
+              <div>
+                <span className="text-[11px] text-muted">实测用量</span>
+                <p className="mt-0.5 text-[18px] font-semibold text-fg">
+                  {fmtNum(selectedNode.usage)} <span className="text-[11px] font-normal text-muted">{unit}</span>
+                </p>
+              </div>
+              <div>
+                <span className="text-[11px] text-muted">占父总表比例</span>
+                <p className="mt-0.5 text-[16px] font-semibold text-primary">
+                  {selectedNode.share != null ? fmtPct(Math.abs(selectedNode.share)) : '—'}
+                </p>
+              </div>
+            </div>
+
+            <dl className="divide-y divide-line rounded-[4px] border border-line text-[12px]">
+              <div className="flex justify-between gap-3 px-3.5 py-2.5">
+                <dt className="text-muted">计量点编号</dt>
+                <dd className="font-mono text-right text-fg">{selectedNode.terminalId}</dd>
+              </div>
+              <div className="flex justify-between gap-3 px-3.5 py-2.5">
+                <dt className="text-muted">采集项编码</dt>
+                <dd className="font-mono text-right text-fg">{selectedNode.itemCode}</dd>
+              </div>
+              <div className="flex justify-between gap-3 px-3.5 py-2.5">
+                <dt className="text-muted">归属区域</dt>
+                <dd className="text-right text-fg">{selectedNode.zone}</dd>
+              </div>
+              <div className="flex justify-between gap-3 px-3.5 py-2.5">
+                <dt className="text-muted">平衡与质量状态</dt>
+                <dd className="text-right font-medium text-fg">{selectedNode.statusLabel}</dd>
+              </div>
+              <div className="flex justify-between gap-3 px-3.5 py-2.5">
+                <dt className="text-muted">物理拓扑版本</dt>
+                <dd className="font-mono text-right text-muted">{selectedNode.topologyVersion || '—'}</dd>
+              </div>
+              <div className="flex justify-between gap-3 px-3.5 py-2.5">
+                <dt className="text-muted">统计自然窗口</dt>
+                <dd className="text-right text-muted">
+                  {fmtShanghaiDate(data.from)} ~ {fmtShanghaiDate(data.to)}
+                </dd>
+              </div>
+            </dl>
+
+            {selectedNode.note && (
+              <p className="rounded-[4px] border border-warning/30 bg-warning-soft/40 px-3.5 py-2.5 text-[11px] leading-relaxed text-fg-2">
+                {selectedNode.note}
+              </p>
+            )}
+          </div>
+        </aside>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }
@@ -6603,27 +6618,28 @@ function LiveBenchmarksView({
           </div>
         </div>
 
-        <div className="grid divide-y divide-line sm:grid-cols-2 lg:grid-cols-4 lg:divide-y-0 lg:divide-x tabular">
-          <div className="p-4">
-            <p className="text-[12px] text-fg-2">已匹配对标规则</p>
-            <p className="mt-1.5 text-[24px] font-semibold leading-[30px] text-fg">
-              {matchedCount}
-              <span className="ml-1 text-[13px] font-normal text-muted">/ {rows.length} 项指标</span>
-            </p>
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-1.5 px-5 py-2.5 text-[12px] tabular">
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-muted">已匹配规则</span>
+            <strong className="text-[15px] font-semibold text-fg">{matchedCount}</strong>
+            <span className="text-[11px] text-muted">/ {rows.length} 项</span>
           </div>
-          <div className="p-4">
-            <p className="text-[12px] text-fg-2">低于阈值上限</p>
-            <p className="mt-1.5 text-[24px] font-semibold leading-[30px] text-positive">{withinCount}</p>
+          <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-muted">低于上限</span>
+            <strong className="text-[15px] font-semibold text-positive">{withinCount}</strong>
           </div>
-          <div className="p-4">
-            <p className="text-[12px] text-fg-2">超出阈值上限</p>
-            <p className={`mt-1.5 text-[24px] font-semibold leading-[30px] ${exceedsCount > 0 ? 'text-negative' : 'text-fg'}`}>
+          <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-muted">超出上限</span>
+            <strong className={`text-[15px] font-semibold ${exceedsCount > 0 ? 'text-negative' : 'text-fg'}`}>
               {exceedsCount}
-            </p>
+            </strong>
           </div>
-          <div className="bg-fill-1/35 p-4">
-            <p className="text-[12px] text-fg-2">无标准 / 不可对标</p>
-            <p className="mt-1.5 text-[24px] font-semibold leading-[30px] text-fg-2">{uncomparableCount}</p>
+          <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-muted">无标准/不可对标</span>
+            <strong className="text-[15px] font-semibold text-fg-2">{uncomparableCount}</strong>
           </div>
         </div>
       </section>
@@ -7915,29 +7931,30 @@ function LiveOpportunitiesView({
           </button>
         </div>
 
-        <div className="grid divide-y divide-line sm:grid-cols-2 lg:grid-cols-4 lg:divide-y-0 lg:divide-x tabular">
-          <div className="p-4">
-            <p className="text-[12px] font-medium text-fg-2">已识别诊断线索</p>
-            <p className="mt-1.5 text-[24px] font-semibold leading-[30px] text-fg">
-              {pendingCount + confirmedCount}
-              <span className="ml-1 text-[12px] font-normal text-muted">条候选（覆盖 {portfolioOpps.length || 1} 栋建筑）</span>
-            </p>
+        <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-1.5 px-5 py-2.5 text-[12px] tabular">
+          <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1.5">
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-muted">已识别线索</span>
+              <strong className="text-[15px] font-semibold text-fg">{pendingCount + confirmedCount}</strong>
+              <span className="text-[11px] text-muted">条（覆盖 {portfolioOpps.length || 1} 栋建筑）</span>
+            </div>
+            <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-muted">待人工核查</span>
+              <strong className="text-[15px] font-semibold text-warning">{pendingCount}</strong>
+            </div>
+            <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-muted">已人工确认</span>
+              <strong className="text-[15px] font-semibold text-positive">{confirmedCount}</strong>
+            </div>
+            <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-muted">无候选/数据不足</span>
+              <strong className="text-[15px] font-semibold text-fg-2">{insufficientCount}</strong>
+            </div>
           </div>
-          <div className="p-4">
-            <p className="text-[12px] font-medium text-fg-2">待人工核查</p>
-            <p className="mt-1.5 text-[24px] font-semibold leading-[30px] text-warning">{pendingCount}</p>
-            <p className="mt-0.5 text-[11px] text-muted">需结合现场班次与表具复核</p>
-          </div>
-          <div className="p-4">
-            <p className="text-[12px] font-medium text-fg-2">已人工确认（候选）</p>
-            <p className="mt-1.5 text-[24px] font-semibold leading-[30px] text-positive">{confirmedCount}</p>
-            <p className="mt-0.5 text-[11px] text-muted">确认后由用户在 F18 手动立项</p>
-          </div>
-          <div className="bg-fill-1/35 p-4">
-            <p className="text-[12px] font-medium text-fg-2">无候选 / 数据不足</p>
-            <p className="mt-1.5 text-[24px] font-semibold leading-[30px] text-fg-2">{insufficientCount}</p>
-            <p className="mt-0.5 text-[11px] text-muted">不满足门槛不伪造潜力估算</p>
-          </div>
+          <span className="text-[11px] text-muted">确认后在 F18 手动立项，不满足门槛不伪造潜力</span>
         </div>
       </section>
 
