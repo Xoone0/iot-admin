@@ -717,68 +717,44 @@ export function RetrofitWorkspace({
                 </span>
               </div>
 
-              <div className="grid divide-y divide-line sm:grid-cols-2 sm:divide-y-0 lg:grid-cols-4 lg:divide-x tabular">
-                <div className="p-4 lg:p-5">
-                  <div className="flex items-center justify-between gap-2 text-[12px]">
-                    <span className="font-medium text-fg-2">M&amp;V 核验节能量</span>
+              {/* Compact 1-Line M&V Verdict Ribbon (Removes 4-KPI duplication of Waterfall Bridge numbers below) */}
+              <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 px-5 py-3 text-[12px] tabular">
+                <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1.5">
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-muted">M&amp;V 核验节能</span>
+                    <strong className={`text-[18px] font-semibold ${active.verifiedSavings != null ? 'text-positive' : 'text-fg'}`}>
+                      {active.verifiedSavings != null ? fmtNum(active.verifiedSavings) : '未核验'}
+                    </strong>
+                    {active.verifiedSavings != null && <span className="text-[11px] text-muted">{active.unit}</span>}
                     {active.verifiedSavingsRate != null && (
-                      <span className="rounded-[2px] bg-positive-soft px-1.5 py-0 text-[11px] font-medium leading-[18px] text-positive">
+                      <span className="rounded-[2px] bg-positive-soft px-1.5 py-0 text-[11px] font-medium text-positive">
                         节能率 {fmtPct(active.verifiedSavingsRate)}
                       </span>
                     )}
                   </div>
-                  <p
-                    className={`mt-2 text-[26px] font-semibold leading-[32px] tracking-[-0.02em] ${
-                      active.verifiedSavings != null ? 'text-positive' : 'text-fg'
-                    }`}
-                  >
-                    {active.verifiedSavings != null ? fmtNum(active.verifiedSavings) : '未核验'}
-                    {active.verifiedSavings != null && (
-                      <span className="ml-1 text-[12px] font-normal text-muted">{active.unit}</span>
-                    )}
-                  </p>
-                  <p className="mt-1.5 text-[11px] text-muted">
-                    {active.verifiedSavings != null ? `基线版本 ${active.baselineVersion}` : '门禁未通过不输出伪造节能量'}
-                  </p>
+                  <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-muted">参考节费</span>
+                    <strong className="text-[15px] font-semibold text-fg">
+                      {active.verifiedCostSavings != null ? `¥${fmtNum(active.verifiedCostSavings)}` : '—'}
+                    </strong>
+                  </div>
+                  {active.verifiedCarbonReductionKgCO2 != null && (
+                    <>
+                      <span className="hidden h-3.5 w-px bg-line sm:inline-block" aria-hidden="true" />
+                      <div className="flex items-baseline gap-1.5">
+                        <span className="text-muted">模拟参考减碳</span>
+                        <strong className="font-semibold text-fg">
+                          {fmtNum(active.verifiedCarbonReductionKgCO2)}
+                        </strong>
+                        <span className="text-[11px] text-muted">kgCO₂e</span>
+                      </div>
+                    </>
+                  )}
                 </div>
-
-                <div className="p-4 lg:p-5">
-                  <p className="text-[12px] font-medium text-fg-2">调整后基线用量</p>
-                  <p className="mt-2 text-[24px] font-semibold leading-[32px] tracking-[-0.02em] text-fg">
-                    {active.adjustedBaselineUse != null ? fmtNum(active.adjustedBaselineUse) : '未配置'}
-                    {active.adjustedBaselineUse != null && (
-                      <span className="ml-1 text-[12px] font-normal text-muted">{active.unit}</span>
-                    )}
-                  </p>
-                  <p className="mt-1.5 text-[11px] text-muted">
-                    非例行调整 {fmtNum(active.nonRoutineAdjustment)} {active.unit}
-                  </p>
-                </div>
-
-                <div className="p-4 lg:p-5">
-                  <p className="text-[12px] font-medium text-fg-2">报告期实际用量</p>
-                  <p className="mt-2 text-[24px] font-semibold leading-[32px] tracking-[-0.02em] text-primary">
-                    {active.reportActualUsage != null ? fmtNum(active.reportActualUsage) : '—'}
-                    {active.reportActualUsage != null && (
-                      <span className="ml-1 text-[12px] font-normal text-muted">{active.unit}</span>
-                    )}
-                  </p>
-                  <p className="mt-1.5 text-[11px] text-muted">
-                    {fmtShanghaiDate(active.reportFrom)} ~ {fmtShanghaiDate(active.reportTo)}（{reportDays} 天）
-                  </p>
-                </div>
-
-                <div className="bg-fill-1/35 p-4 lg:p-5">
-                  <p className="text-[12px] font-medium text-fg-2">参考节费 &amp; 模拟碳减排</p>
-                  <p className="mt-2 text-[24px] font-semibold leading-[32px] tracking-[-0.02em] text-fg">
-                    {active.verifiedCostSavings != null ? `¥${fmtNum(active.verifiedCostSavings)}` : '—'}
-                  </p>
-                  <p className="mt-1.5 truncate text-[11px] text-muted">
-                    {active.verifiedCarbonReductionKgCO2 != null
-                      ? `参考碳减排 ${fmtNum(active.verifiedCarbonReductionKgCO2)} kgCO₂e`
-                      : 'sim-carbon-factors-v1（非履约凭证）'}
-                  </p>
-                </div>
+                <span className="font-mono text-[11px] text-muted">
+                  基线 {active.baselineVersion} · 报告期 {fmtShanghaiDate(active.reportFrom)} ~ {fmtShanghaiDate(active.reportTo)}（{reportDays} 天）
+                </span>
               </div>
             </section>
 

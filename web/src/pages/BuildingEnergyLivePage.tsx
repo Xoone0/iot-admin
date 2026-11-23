@@ -601,7 +601,7 @@ export default function BuildingEnergyLivePage({ section = 'overview' }: { secti
       const effectiveFields =
         fieldsParam ||
         (scope === 'consumption'
-          ? 'category_name,energy,usage,unit,share,coverage_rate,window_from'
+          ? 'category_name,energy,usage,unit,share,coverage_rate,coverage_slots'
           : 'metric_name,building_name,metric_value,metric_unit,benchmark_max,benchmark_status,metric_status');
       qs.set('fields', effectiveFields);
     }
@@ -1875,29 +1875,36 @@ function LiveCompositionView({
     return rows.sort((a, b) => (a.isUnclassified ? 1 : b.isUnclassified ? -1 : b.value - a.value));
   }, [focusedCard, prevFocusedCard, bindingMap]);
 
-  // Three strictly server-derived analytical findings (zero fabricated claims when prior day is unavailable)
+  const hasComparablePrev = Boolean(
+    prevFocusedCard && prevFocusedCard.usage != null && prevFocusedCard.usage > 0,
+  );
   const topSystem = categoryRows.find((r) => !r.isUnclassified) ?? categoryRows[0] ?? null;
   const totalDelta =
-    focusedCard?.usage != null && prevFocusedCard?.usage != null
+    hasComparablePrev && focusedCard?.usage != null && prevFocusedCard?.usage != null
       ? focusedCard.usage - prevFocusedCard.usage
       : null;
-  const positiveGrowers = categoryRows
-    .filter((r) => r.usageDelta != null && r.usageDelta > 0.01)
-    .sort((a, b) => (b.usageDelta ?? 0) - (a.usageDelta ?? 0));
+  const positiveGrowers = hasComparablePrev
+    ? categoryRows
+        .filter((r) => r.usageDelta != null && r.usageDelta > 0.01)
+        .sort((a, b) => (b.usageDelta ?? 0) - (a.usageDelta ?? 0))
+    : [];
   const topGrowthDriver = positiveGrowers[0] ?? null;
   const growthContribRatio =
     topGrowthDriver?.usageDelta != null && totalDelta != null && totalDelta > 0
       ? Math.min(1, topGrowthDriver.usageDelta / totalDelta)
       : null;
 
-  const topShareMover =
-    categoryRows
-      .filter((r) => r.shareDiffPp != null)
-      .sort((a, b) => Math.abs(b.shareDiffPp ?? 0) - Math.abs(a.shareDiffPp ?? 0))[0] ?? null;
+  const topShareMover = hasComparablePrev
+    ? categoryRows
+        .filter((r) => r.shareDiffPp != null)
+        .sort((a, b) => Math.abs(b.shareDiffPp ?? 0) - Math.abs(a.shareDiffPp ?? 0))[0] ?? null
+    : null;
 
   const drilledNode = drilledCatId ? categoryRows.find((r) => r.id === drilledCatId) ?? null : null;
   const drawerNode = sourceDrawerCatId ? categoryRows.find((r) => r.id === sourceDrawerCatId) ?? null : null;
 
+  // Clicking a category tile drills smoothly into its real bound meters INSIDE the Treemap;
+  // only categories with zero confirmed meter bindings open the provenance drawer directly to explain why.
   const handleTreemapClick = (catId: string | null) => {
     if (!catId) {
       setDrilledCatId(null);
@@ -1907,8 +1914,9 @@ function LiveCompositionView({
     if (!target) return;
     if (target.children.length > 0) {
       setDrilledCatId(catId);
+    } else {
+      setSourceDrawerCatId(catId);
     }
-    setSourceDrawerCatId(catId);
   };
 
   return (
@@ -1943,26 +1951,40 @@ function LiveCompositionView({
 
             <div className="flex items-center gap-2 text-[11px]">
               {drilledNode && (
-                <button
-                  type="button"
-                  data-treemap-back
-                  onClick={() => setDrilledCatId(null)}
-                  className="rounded-[2px] border border-line bg-surface px-2.5 py-1 font-medium text-fg-2 hover:bg-fill-1"
-                >
-                  返回全部分项
-                </button>
+                <>
+                  <button
+                    type="button"
+                    data-f02-open-drilled-source
+                    onClick={() => setSourceDrawerCatId(drilledNode.id)}
+                    className="rounded-[2px] border border-primary/40 bg-primary-soft/50 px-2.5 py-1 font-medium text-primary hover:bg-primary-soft"
+                  >
+                    查看溯源明细
+                  </button>
+                  <button
+                    type="button"
+                    data-treemap-back
+                    onClick={() => setDrilledCatId(null)}
+                    className="rounded-[2px] border border-line bg-surface px-2.5 py-1 font-medium text-fg-2 hover:bg-fill-1"
+                  >
+                    返回全部分项
+                  </button>
+                </>
               )}
-              <span className="text-muted">单一物理单位 ({focusedCard?.unit}) 独立构成 · 点击系统块下钻</span>
+              {!drilledNode && (
+                <span className="text-muted">单一物理单位 ({focusedCard?.unit}) 独立构成 · 点击系统块下钻</span>
+              )}
             </div>
           </div>
 
           <div className="flex-1">
             <EnergyTreemapChart
+              key={`${focusedCard?.energy ?? selectedEnergy}-${drilledCatId ?? 'root'}`}
               nodes={categoryRows}
               unit={focusedCard?.unit ?? ''}
               energyLabel={focusedLabel}
               focusedCategoryId={drilledCatId}
               onSelectCategory={handleTreemapClick}
+              onSelectMeter={(catId) => setSourceDrawerCatId(catId)}
               height={520}
             />
           </div>
@@ -1974,7 +1996,9 @@ function LiveCompositionView({
             <div className="border-b border-line pb-2.5">
               <h2 className="text-[14px] font-semibold text-fg">分析发现</h2>
               <p className="mt-0.5 text-[11px] text-muted">
-                基于 {anchorDate} 与前一日 {prevDateLabel} 实测构成比对
+                {hasComparablePrev
+                  ? `基于 ${anchorDate} 与前一日 ${prevDateLabel} 实测构成比对`
+                  : `${anchorDate} · 无可比前日实测数据`}
               </p>
             </div>
 
@@ -2010,8 +2034,8 @@ function LiveCompositionView({
                   <span className="font-medium text-warning">贡献 {fmtPct(growthContribRatio)}</span>
                 )}
               </div>
-              {!prevFocusedCard ? (
-                <p className="mt-1.5 text-[12px] text-muted">暂无可比前日数据，不输出增长归因</p>
+              {!hasComparablePrev ? (
+                <p className="mt-1.5 text-[12px] text-muted">无可比前日实测数据，不输出增长归因</p>
               ) : topGrowthDriver ? (
                 <>
                   <p className="mt-1.5 text-[15px] font-semibold text-fg">{topGrowthDriver.name}</p>
@@ -2065,7 +2089,7 @@ function LiveCompositionView({
                   </button>
                 </>
               ) : (
-                <p className="mt-1.5 text-[12px] text-muted">暂无可比前日占比数据</p>
+                <p className="mt-1.5 text-[12px] text-muted">无可比前日实测数据，不计算结构变动</p>
               )}
             </div>
           </div>
@@ -5156,11 +5180,17 @@ function LiveBalanceView({ data }: { data: BalanceData }) {
   const parentUsage = rep.Parent?.Usage ?? null;
   const highImbalance = rep.DifferenceRate != null && Math.abs(rep.DifferenceRate) >= 0.05;
 
+  const stripBuildingPrefix = (rawName: string): string => {
+    const prefix = `${data.buildingName} · `;
+    return rawName.startsWith(prefix) ? rawName.slice(prefix.length) : rawName;
+  };
+
   const parentMeta: SankeyMeterNodeMeta = {
     id: rep.Parent
       ? `parent::${rep.Parent.Meter.Point.Key.TerminalID}:${rep.Parent.Meter.Point.Key.ItemCode}`
       : 'parent::main',
     name: rep.Parent?.Meter?.Name || '父总表',
+    displayName: stripBuildingPrefix(rep.Parent?.Meter?.Name || '父总表'),
     role: 'parent',
     terminalId: rep.Parent?.Meter.Point.Key.TerminalID ?? '—',
     itemCode: rep.Parent?.Meter.Point.Key.ItemCode ?? '—',
@@ -5176,6 +5206,7 @@ function LiveBalanceView({ data }: { data: BalanceData }) {
   const childMetas: SankeyMeterNodeMeta[] = (rep.Children ?? []).map((ch) => ({
     id: `child::${ch.Meter.Point.Key.TerminalID}:${ch.Meter.Point.Key.ItemCode}`,
     name: ch.Meter.Name,
+    displayName: stripBuildingPrefix(ch.Meter.Name),
     role: 'child',
     terminalId: ch.Meter.Point.Key.TerminalID,
     itemCode: ch.Meter.Point.Key.ItemCode,
@@ -5284,7 +5315,7 @@ function LiveBalanceView({ data }: { data: BalanceData }) {
           </div>
         </div>
 
-        {/* Dedicated Full-Space Sankey Canvas */}
+        {/* Dedicated Full-Viewport Sankey Canvas */}
         <div className="bg-surface px-4 py-3">
           <EnergySankeyChart
             parentNode={parentMeta}
@@ -5294,7 +5325,7 @@ function LiveBalanceView({ data }: { data: BalanceData }) {
             zoom={zoom}
             selectedNodeId={selectedNode?.id ?? null}
             onSelectNode={(node) => setSelectedNode(node)}
-            height={580}
+            height="clamp(540px, calc(100vh - 185px), 780px)"
           />
         </div>
       </section>

@@ -382,6 +382,23 @@ export async function livePost<T>(
   return { status: res.status, data: body.data };
 }
 
+export async function verifyLiveCsvAuth(path: string, token: string): Promise<string | null> {
+  const sep = path.includes('?') ? '&' : '?';
+  const res = await fetch(`${LIVE_API_PREFIX}${path}${sep}format=csv`, {
+    credentials: 'same-origin',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) {
+    try {
+      const body = (await res.json()) as { message?: string };
+      return body.message ?? `CSV 导出无权限或失败（HTTP ${res.status}）`;
+    } catch {
+      return `CSV 导出无权限或失败（HTTP ${res.status}）`;
+    }
+  }
+  return null;
+}
+
 export async function downloadLiveCsv(path: string, token: string, filename: string): Promise<string | null> {
   const sep = path.includes('?') ? '&' : '?';
   const res = await fetch(`${LIVE_API_PREFIX}${path}${sep}format=csv`, {

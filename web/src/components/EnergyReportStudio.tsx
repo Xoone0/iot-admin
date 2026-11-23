@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   ArrowUpDown,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Columns3,
@@ -15,6 +16,7 @@ import {
 import {
   downloadLiveCsv,
   liveGet,
+  verifyLiveCsvAuth,
   type InventoryData,
   type LiveReportData,
   type ReportColumn,
@@ -60,17 +62,17 @@ const statusBadges: Record<string, { label: string; cls: string }> = {
   estimated_only: { label: '仅估算', cls: 'bg-fill-2 text-fg-2' },
 };
 
-// Default 6-8 core business columns per report (technical/audit columns move to Column Settings & Row Detail Drawer)
+// Default 6-8 high-value business columns per report (technical IDs & repeated dates move to Column Settings & Row Detail Drawer)
 const DEFAULT_VISIBLE_KEYS: Record<Exclude<ReportSection, 'report-custom'>, string[]> = {
-  'report-consumption': ['category_name', 'energy', 'usage', 'unit', 'share', 'coverage_rate', 'window_from'],
+  'report-consumption': ['category_name', 'energy', 'usage', 'unit', 'share', 'coverage_rate'],
   'report-metrics': ['metric_name', 'metric_value', 'metric_unit', 'benchmark_max', 'benchmark_kind', 'benchmark_status', 'metric_status'],
   'report-assessment': ['object_name', 'energy', 'target_value', 'actual_usage', 'unit', 'deviation', 'score', 'review_status'],
-  'report-retrofit': ['name', 'building_name', 'energy', 'baseline_version', 'est_savings_base', 'verified_savings', 'unit', 'mv_status'],
+  'report-retrofit': ['name', 'building_name', 'energy', 'est_savings_base', 'verified_savings', 'unit', 'mv_status'],
 };
 
 const F25_DEFAULT_KEYS: Record<string, string[]> = {
   metrics: ['metric_name', 'building_name', 'metric_value', 'metric_unit', 'benchmark_max', 'benchmark_status', 'metric_status'],
-  consumption: ['category_name', 'energy', 'usage', 'unit', 'share', 'coverage_rate', 'window_from'],
+  consumption: ['category_name', 'energy', 'usage', 'unit', 'share', 'coverage_rate', 'coverage_slots'],
 };
 
 const NUMERIC_KEYS = new Set([
@@ -174,8 +176,9 @@ export function EnergyReportStudio({
   const [f23Group, setF23Group] = useState<AssessmentGroup>('all');
   const [f24StatusFilter, setF24StatusFilter] = useState<string>('all');
 
-  // Column Settings Popover (F21-F24) + F25 Field Config Panel + Row Detail Slide-Over Drawer
+  // Column Settings Popover (F21-F24) + Export Menu + F25 Field Config Panel + Row Detail Slide-Over Drawer
   const [colMenuOpen, setColMenuOpen] = useState<boolean>(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState<boolean>(false);
   const [customPanelOpen, setCustomPanelOpen] = useState<boolean>(false);
   const [visibleColKeys, setVisibleColKeys] = useState<string[] | null>(null);
   const [detailRow, setDetailRow] = useState<Record<string, string> | null>(null);
@@ -204,6 +207,7 @@ export function EnergyReportStudio({
     setF24StatusFilter('all');
     setVisibleColKeys(null);
     setColMenuOpen(false);
+    setExportMenuOpen(false);
     setCustomPanelOpen(false);
     setDetailRow(null);
     setCsvErr(null);
@@ -308,6 +312,19 @@ export function EnergyReportStudio({
     return `${basePath}?${qs.toString()}`;
   }, [section, endpoint, scope, selectedFields]);
 
+  // Official full-schema backend export URL (on F25 explicitly requests all allowed whitelist fields)
+  const fullExportEndpoint = useMemo(() => {
+    if (section !== 'report-custom') return endpoint;
+    const [basePath, qsRaw = ''] = endpoint.split('?');
+    const qs = new URLSearchParams(qsRaw);
+    qs.set('scope', scope);
+    if (allowedFields.length > 0) qs.set('fields', allowedFields.map((f) => f.key).join(','));
+    else qs.delete('fields');
+    return `${basePath}?${qs.toString()}`;
+  }, [section, endpoint, scope, allowedFields]);
+
+  const fullFieldCount = section === 'report-custom' ? allowedFields.length : allColumns.length;
+
   useEffect(() => {
     const el = tableWrapRef.current;
     if (!el) return;
@@ -356,29 +373,6 @@ export function EnergyReportStudio({
     );
   }, [section, rawRows]);
 
-  // Compact footer totals (only mathematically valid sums)
-  const footerSummary = useMemo(() => {
-    if (section === 'report-consumption') {
-      return `共 ${rawRows.length} 条记录（含各能源独立 TOTAL 汇总行）；不同物理单位不跨能源相加`;
-    }
-    if (section === 'report-metrics') {
-      const ready = rawRows.filter((r) => r.metric_status === 'ready').length;
-      const missing = rawRows.length - ready;
-      return `已计算 ${ready} 项 · 缺分母 ${missing} 项（多单位指标不跨单位求和）`;
-    }
-    if (section === 'report-assessment') {
-      const confirmed = rawRows.filter((r) => r.review_status === 'confirmed').length;
-      const wSum = rawRows.reduce((s, r) => s + (parseNum(r.weighted_score) ?? 0), 0);
-      return `共 ${rawRows.length} 个考核对象 · 已确认 ${confirmed} 项 · 有效加权分合计 ${fmtNum(wSum)}`;
-    }
-    if (section === 'report-retrofit') {
-      const verified = rawRows.filter((r) => r.mv_status === 'verified_simulated');
-      const carb = verified.reduce((s, r) => s + (parseNum(r.verified_carbon_kgco2e) ?? 0), 0);
-      return `共 ${rawRows.length} 个项目 · 已核验 ${verified.length} 项 · 已核验参考减碳 ${fmtNum(carb)} kgCO₂e`;
-    }
-    return `白名单已选 ${activeColumns.length} / ${allowedFields.length} 列 · 预览与 CSV 严格逐列一致`;
-  }, [section, rawRows, activeColumns.length, allowedFields.length]);
-
   const filteredRows = useMemo(() => {
     let list = rawRows;
     if (section === 'report-consumption' && f21EnergyTab !== 'all') {
@@ -405,6 +399,32 @@ export function EnergyReportStudio({
     }
     return list;
   }, [section, rawRows, f21EnergyTab, f23Group, f24StatusFilter, searchQuery, allColumns]);
+
+  // Concise single-line footer counts (no boilerplate disclaimers)
+  const footerSummary = useMemo(() => {
+    const shown = filteredRows.length;
+    const total = rawRows.length;
+    const countLabel = shown === total ? `共 ${total} 条` : `当前筛选 ${shown} / 共 ${total} 条`;
+    if (section === 'report-consumption') {
+      return `${countLabel} · 各能源独立计单位`;
+    }
+    if (section === 'report-metrics') {
+      const ready = filteredRows.filter((r) => r.metric_status === 'ready').length;
+      const missing = shown - ready;
+      return `${countLabel} · 已计算 ${ready} 项${missing > 0 ? ` · 缺分母 ${missing} 项` : ''}`;
+    }
+    if (section === 'report-assessment') {
+      const confirmed = filteredRows.filter((r) => r.review_status === 'confirmed').length;
+      const wSum = filteredRows.reduce((s, r) => s + (parseNum(r.weighted_score) ?? 0), 0);
+      return `${countLabel} · 已确认 ${confirmed} 项 · 加权分合计 ${fmtNum(wSum)}`;
+    }
+    if (section === 'report-retrofit') {
+      const verified = filteredRows.filter((r) => r.mv_status === 'verified_simulated');
+      const carb = verified.reduce((s, r) => s + (parseNum(r.verified_carbon_kgco2e) ?? 0), 0);
+      return `${countLabel} · 已核验 ${verified.length} 项${carb > 0 ? ` · 参考减碳 ${fmtNum(carb)} kgCO₂e` : ''}`;
+    }
+    return `${countLabel} · 已选 ${activeColumns.length}/${allowedFields.length} 列`;
+  }, [section, rawRows.length, filteredRows, activeColumns.length, allowedFields.length]);
 
   const sortedRows = useMemo(() => {
     const copy = [...filteredRows];
@@ -459,11 +479,48 @@ export function EnergyReportStudio({
     if (filtered.length > 0) onFieldsChange(filtered);
   };
 
-  const handleDownload = async () => {
+  const escapeCsvCell = (raw: string): string => {
+    const s = raw ?? '';
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+
+  // Export strictly currently visible columns in current filtered & sorted row order (after RBAC check)
+  const handleDownloadVisible = async () => {
+    setExportMenuOpen(false);
     setCsvErr(null);
     setDownloading(true);
     try {
-      const err = await downloadLiveCsv(effectiveExportEndpoint, token, `energy-report-${data.reportCode.toLowerCase()}.csv`);
+      const authErr = await verifyLiveCsvAuth(effectiveExportEndpoint, token);
+      if (authErr) {
+        setCsvErr(authErr);
+        return;
+      }
+      const header = activeColumns.map((c) => escapeCsvCell(c.label)).join(',');
+      const lines = sortedRows.map((row) =>
+        activeColumns.map((c) => escapeCsvCell(row[c.key] ?? '')).join(','),
+      );
+      const csvText = `\uFEFF${[header, ...lines].join('\r\n')}\r\n`;
+      const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `energy-report-${data.reportCode.toLowerCase()}-visible-${activeColumns.length}cols.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  // Export official full-schema backend CSV snapshot
+  const handleDownloadFull = async () => {
+    setExportMenuOpen(false);
+    setCsvErr(null);
+    setDownloading(true);
+    try {
+      const err = await downloadLiveCsv(fullExportEndpoint, token, `energy-report-${data.reportCode.toLowerCase()}-full.csv`);
       if (err) setCsvErr(err);
     } finally {
       setDownloading(false);
@@ -743,16 +800,60 @@ export function EnergyReportStudio({
               <span>打印</span>
             </button>
 
-            <button
-              type="button"
-              data-report-export-csv
-              disabled={downloading}
-              onClick={handleDownload}
-              className="inline-flex h-7 items-center gap-1.5 rounded-[2px] bg-primary px-3 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-50"
-            >
-              <Download className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>{downloading ? '导出中…' : '导出 CSV'}</span>
-            </button>
+            <div className="relative">
+              <button
+                type="button"
+                data-report-export-csv
+                disabled={downloading}
+                onClick={() => {
+                  setColMenuOpen(false);
+                  setExportMenuOpen((v) => !v);
+                }}
+                className="inline-flex h-7 items-center gap-1.5 rounded-[2px] bg-primary px-3 text-[11px] font-medium text-white hover:bg-primary/90 disabled:opacity-50"
+              >
+                <Download className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>{downloading ? '导出中…' : '导出 CSV'}</span>
+                <ChevronDown className="h-3 w-3 opacity-85" aria-hidden="true" />
+              </button>
+
+              {exportMenuOpen && (
+                <div
+                  role="menu"
+                  aria-label="选择 CSV 导出口径"
+                  data-export-csv-menu
+                  className="absolute right-0 top-9 z-30 w-64 rounded-[4px] border border-line bg-surface p-1.5 shadow-xl"
+                >
+                  <button
+                    type="button"
+                    role="menuitem"
+                    data-export-visible-csv
+                    onClick={handleDownloadVisible}
+                    className="flex w-full flex-col items-start rounded-[2px] px-3 py-2 text-left hover:bg-fill-1"
+                  >
+                    <span className="text-[12px] font-medium text-fg">
+                      导出当前可见列（{activeColumns.length} 列）
+                    </span>
+                    <span className="mt-0.5 text-[10px] text-muted">
+                      严格同步当前筛选、排序与 {sortedRows.length} 条记录
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    data-export-full-csv
+                    onClick={handleDownloadFull}
+                    className="mt-0.5 flex w-full flex-col items-start rounded-[2px] border-t border-line/70 px-3 py-2 text-left hover:bg-fill-1"
+                  >
+                    <span className="text-[12px] font-medium text-fg">
+                      导出完整字段（全部 {fullFieldCount} 列）
+                    </span>
+                    <span className="mt-0.5 text-[10px] text-muted">
+                      后端官方审计快照（含版本号与计量边界）
+                    </span>
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 

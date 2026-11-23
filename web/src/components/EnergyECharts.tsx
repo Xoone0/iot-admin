@@ -13,15 +13,18 @@ function fmtVal(v: number | null | undefined): string {
   return v == null || !Number.isFinite(v) ? '—' : numFmt.format(v);
 }
 
-// Restrained industrial energy palette (aligned with Arco Design tokens — zero neon/rainbow noise)
-const TREEMAP_PALETTE = [
-  '#165DFF', // primary cobalt
-  '#0FC6C2', // teal
-  '#3491FA', // azure
-  '#551DB0', // deep indigo
-  '#00B42A', // emerald
-  '#722ED1', // violet
+// Restrained editorial industrial energy palette (zero loud/neon colors)
+const EDITORIAL_PALETTE = [
+  '#2563EB', // architectural cobalt
+  '#0F766E', // deep muted teal
+  '#3B82F6', // clear slate-blue
+  '#4338CA', // restrained indigo
+  '#047857', // forest emerald
+  '#475569', // neutral steel slate
 ];
+
+const SANKEY_PARENT_COLOR = '#1E40AF';
+const SANKEY_DIFF_COLOR = '#D97706';
 
 // ── 1. F02 Interactive Composition Treemap (Apache ECharts) ──────────────────
 
@@ -55,13 +58,15 @@ export function EnergyTreemapChart({
   energyLabel,
   focusedCategoryId,
   onSelectCategory,
-  height = 500,
+  onSelectMeter,
+  height = 520,
 }: {
   nodes: TreemapCategoryNode[];
   unit: string;
   energyLabel: string;
   focusedCategoryId: string | null;
   onSelectCategory: (catId: string | null) => void;
+  onSelectMeter?: (catId: string) => void;
   height?: number;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -92,40 +97,39 @@ export function EnergyTreemapChart({
     const focusedNode = focusedCategoryId ? nodes.find((n) => n.id === focusedCategoryId) ?? null : null;
     const isDrilled = Boolean(focusedNode && focusedNode.children.length > 0);
 
-    const seriesData = isDrilled && focusedNode
-      ? focusedNode.children.map((leaf, idx) => ({
-          id: leaf.id,
-          name: leaf.name,
-          value: Math.max(leaf.value, 0.0001),
-          itemStyle: {
-            color: TREEMAP_PALETTE[idx % TREEMAP_PALETTE.length],
-            borderColor: '#FFFFFF',
-            borderWidth: 2,
-            gapWidth: 2,
-          },
-          rawMeta: {
-            kind: 'meter' as const,
-            categoryId: focusedNode.id,
-            categoryName: focusedNode.name,
-            terminalId: leaf.terminalId,
-            sourceTable: leaf.sourceTable,
-            usage: leaf.value,
-            weightPct: leaf.weightPct,
-            share: focusedNode.value > 0 ? leaf.value / focusedNode.value : null,
-            valid: leaf.valid,
-            expected: leaf.expected,
-          },
-        }))
-      : nodes
-          .filter((n) => n.value > 0)
-          .map((n, idx) => {
-            const baseColor = n.isUnclassified ? '#86909C' : TREEMAP_PALETTE[idx % TREEMAP_PALETTE.length];
-            return {
+    const seriesData =
+      isDrilled && focusedNode
+        ? focusedNode.children.map((leaf, idx) => ({
+            id: leaf.id,
+            name: leaf.name,
+            value: Math.max(leaf.value, 0.0001),
+            itemStyle: {
+              color: EDITORIAL_PALETTE[idx % EDITORIAL_PALETTE.length],
+              borderColor: '#FFFFFF',
+              borderWidth: 2,
+              gapWidth: 2,
+            },
+            rawMeta: {
+              kind: 'meter' as const,
+              categoryId: focusedNode.id,
+              categoryName: focusedNode.name,
+              terminalId: leaf.terminalId,
+              sourceTable: leaf.sourceTable,
+              usage: leaf.value,
+              weightPct: leaf.weightPct,
+              share: focusedNode.value > 0 ? leaf.value / focusedNode.value : null,
+              valid: leaf.valid,
+              expected: leaf.expected,
+            },
+          }))
+        : nodes
+            .filter((n) => n.value > 0)
+            .map((n, idx) => ({
               id: n.id,
               name: n.name,
               value: n.value,
               itemStyle: {
-                color: baseColor,
+                color: n.isUnclassified ? '#64748B' : EDITORIAL_PALETTE[idx % EDITORIAL_PALETTE.length],
                 borderColor: '#FFFFFF',
                 borderWidth: 2,
                 gapWidth: 2,
@@ -141,12 +145,11 @@ export function EnergyTreemapChart({
                 childCount: n.children.length,
                 isUnclassified: Boolean(n.isUnclassified),
               },
-            };
-          });
+            }));
 
     chart.setOption(
       {
-        animationDuration: 320,
+        animation: false,
         tooltip: {
           trigger: 'item',
           backgroundColor: 'rgba(15, 23, 42, 0.94)',
@@ -165,21 +168,22 @@ export function EnergyTreemapChart({
                 `<div style="color:#CBD5E1;font-size:11px;margin-bottom:6px">${m.terminalId} · ${m.sourceTable}</div>`,
                 `<div>归属分项用量：<b>${fmtVal(Number(m.usage))} ${unit}</b>（占分项 ${shareTxt}）</div>`,
                 `<div>绑定分摊权重：${Number(m.weightPct).toFixed(0)}% · 有效槽位 ${m.valid}/${m.expected}</div>`,
+                `<div style="margin-top:6px;color:#93C5FD;font-size:11px">点击查看完整计量溯源抽屉 →</div>`,
               ].join('');
             }
             const shareTxt = m.share != null ? pctFmt.format(Number(m.share)) : '—';
             const pp = m.shareDiffPp != null ? Number(m.shareDiffPp) : null;
             const ppTxt = pp != null ? `${pp > 0 ? '+' : ''}${pp.toFixed(1)} pp` : '无可比前日';
             const delta = m.usageDelta != null ? Number(m.usageDelta) : null;
-            const deltaTxt = delta != null ? `${delta > 0 ? '+' : ''}${fmtVal(delta)} ${unit}` : '—';
+            const deltaTxt = delta != null ? `${delta > 0 ? '+' : ''}${fmtVal(delta)} ${unit}` : '无可比前日';
             const drillHint =
               Number(m.childCount) > 0
                 ? `<div style="margin-top:6px;color:#93C5FD;font-size:11px">点击下钻查看 ${m.childCount} 块关联计量点 →</div>`
-                : `<div style="margin-top:6px;color:#94A3B8;font-size:11px">无已绑定下级计量点</div>`;
+                : `<div style="margin-top:6px;color:#94A3B8;font-size:11px">无已绑定下级计量点（点击查看溯源说明）</div>`;
             return [
               `<div style="font-weight:600;margin-bottom:4px">${p.name}</div>`,
               `<div>实测用量：<b>${fmtVal(Number(m.usage))} ${unit}</b>（占${energyLabel} ${shareTxt}）</div>`,
-              `<div>较前日用量变化：${deltaTxt} · 结构变动：${ppTxt}</div>`,
+              `<div>较前日变化：${deltaTxt} · 结构变动：${ppTxt}</div>`,
               `<div>覆盖率：${m.coverageRate != null ? pctFmt.format(Number(m.coverageRate)) : '—'}</div>`,
               drillHint,
             ].join('');
@@ -199,7 +203,7 @@ export function EnergyTreemapChart({
             label: {
               show: true,
               position: 'insideTopLeft',
-              padding: [10, 12],
+              padding: [12, 14],
               formatter: (params: unknown) => {
                 const p = params as { name?: string; data?: { rawMeta?: Record<string, unknown> } };
                 const m = p.data?.rawMeta;
@@ -207,7 +211,7 @@ export function EnergyTreemapChart({
                 const usageStr = `${fmtVal(Number(m.usage))} ${unit}`;
                 const shareStr = m.share != null ? pctFmt.format(Number(m.share)) : '';
                 if (m.kind === 'meter') {
-                  return `{title|${p.name}}\n{val|${usageStr}}\n{sub|${shareStr}}\n{meta|权重 ${Number(m.weightPct).toFixed(0)}% · ${m.terminalId}}`;
+                  return `{title|${p.name}}\n{val|${usageStr}}\n{sub|占分项 ${shareStr} · 权重 ${Number(m.weightPct).toFixed(0)}%}\n{meta|${m.terminalId} · 有效 ${m.valid}/${m.expected} · 点击查看溯源}`;
                 }
                 const pp = m.shareDiffPp != null ? Number(m.shareDiffPp) : null;
                 const ppTag = pp != null && Math.abs(pp) >= 0.05 ? ` · ${pp > 0 ? '+' : ''}${pp.toFixed(1)} pp` : '';
@@ -223,13 +227,13 @@ export function EnergyTreemapChart({
                 },
                 val: {
                   color: '#FFFFFF',
-                  fontSize: 18,
+                  fontSize: 19,
                   fontWeight: 600,
-                  lineHeight: 26,
+                  lineHeight: 28,
                   fontFamily: 'Inter, system-ui, sans-serif',
                 },
                 sub: {
-                  color: 'rgba(255,255,255,0.88)',
+                  color: 'rgba(255,255,255,0.9)',
                   fontSize: 12,
                   fontWeight: 500,
                   lineHeight: 22,
@@ -261,17 +265,19 @@ export function EnergyTreemapChart({
     );
 
     const handleClick = (params: unknown) => {
-      const p = params as { data?: { rawMeta?: { kind?: string; categoryId?: string; childCount?: number } } };
+      const p = params as { data?: { rawMeta?: { kind?: string; categoryId?: string } } };
       const m = p.data?.rawMeta;
       if (!m?.categoryId) return;
       if (m.kind === 'category') {
         onSelectCategory(m.categoryId);
+      } else if (m.kind === 'meter' && onSelectMeter) {
+        onSelectMeter(m.categoryId);
       }
     };
 
     chart.off('click');
     chart.on('click', handleClick);
-  }, [nodes, unit, energyLabel, focusedCategoryId, onSelectCategory]);
+  }, [nodes, unit, energyLabel, focusedCategoryId, onSelectCategory, onSelectMeter]);
 
   if (nodes.filter((n) => n.value > 0).length === 0) {
     return (
@@ -300,6 +306,8 @@ export function EnergyTreemapChart({
 export type SankeyMeterNodeMeta = {
   id: string;
   name: string;
+  /** Shortened display label (strips redundant building prefix already shown in toolbar) */
+  displayName?: string;
   role: 'parent' | 'child' | 'diff';
   terminalId: string;
   itemCode: string;
@@ -320,7 +328,7 @@ export function EnergySankeyChart({
   zoom = 1,
   selectedNodeId,
   onSelectNode,
-  height = 580,
+  height = 'clamp(540px, calc(100vh - 185px), 780px)',
 }: {
   parentNode: SankeyMeterNodeMeta;
   childNodes: SankeyMeterNodeMeta[];
@@ -329,7 +337,7 @@ export function EnergySankeyChart({
   zoom?: number;
   selectedNodeId?: string | null;
   onSelectNode: (node: SankeyMeterNodeMeta) => void;
-  height?: number;
+  height?: number | string;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<echarts.ECharts | null>(null);
@@ -356,34 +364,44 @@ export function EnergySankeyChart({
     const chart = chartRef.current;
     if (!chart) return;
 
+    // Sort child sub-meters strictly descending by usage; keep unassigned diff strictly at bottom (zero flow crossing)
+    const sortedChildren = [...childNodes].sort(
+      (a, b) => Math.abs(b.usage ?? 0) - Math.abs(a.usage ?? 0),
+    );
+    const targets: SankeyMeterNodeMeta[] = [...sortedChildren, ...(diffNode ? [diffNode] : [])];
+
     const metaMap = new Map<string, SankeyMeterNodeMeta>();
     metaMap.set(parentNode.id, parentNode);
-    for (const c of childNodes) metaMap.set(c.id, c);
-    if (diffNode) metaMap.set(diffNode.id, diffNode);
+    for (const t of targets) metaMap.set(t.id, t);
 
-    const targets: SankeyMeterNodeMeta[] = [...childNodes, ...(diffNode ? [diffNode] : [])];
+    const parentShort = parentNode.displayName || parentNode.name;
 
     const nodes = [
       {
         name: parentNode.id,
         depth: 0,
         itemStyle: {
-          color: '#165DFF',
-          borderColor: selectedNodeId === parentNode.id ? '#0E42D2' : 'transparent',
+          color: SANKEY_PARENT_COLOR,
+          borderColor: selectedNodeId === parentNode.id ? '#0F172A' : 'transparent',
           borderWidth: selectedNodeId === parentNode.id ? 2 : 0,
           borderRadius: 2,
         },
         label: {
-          position: 'right' as const,
-          distance: 12,
+          position: 'left' as const,
+          align: 'right' as const,
+          distance: 16,
           formatter: () =>
-            `{title|${parentNode.name}}\n{val|${fmtVal(parentNode.usage)} ${unit}}  {tag|父总表}`,
+            `{title|${parentShort}}\n{val|${fmtVal(parentNode.usage)} ${unit}}\n{tag|父总表 · 100%}`,
         },
       },
       ...targets.map((t, i) => {
         const isDiff = t.role === 'diff';
-        const color = isDiff ? '#FF7D00' : TREEMAP_PALETTE[(i + 1) % TREEMAP_PALETTE.length];
+        const color = isDiff ? SANKEY_DIFF_COLOR : EDITORIAL_PALETTE[i % EDITORIAL_PALETTE.length];
         const shareStr = t.share != null ? pctFmt.format(Math.abs(t.share)) : '—';
+        const shortName = t.displayName || t.name;
+        const metaLine = isDiff
+          ? `待核查差额（非线损）· ${shareStr}`
+          : `${t.zone !== '—' ? t.zone : t.terminalId} · 占总表 ${shareStr}`;
         return {
           name: t.id,
           depth: 1,
@@ -394,10 +412,11 @@ export function EnergySankeyChart({
             borderRadius: 2,
           },
           label: {
-            position: 'left' as const,
-            distance: 12,
+            position: 'right' as const,
+            align: 'left' as const,
+            distance: 16,
             formatter: () =>
-              `{title|${t.name}}  {val|${fmtVal(t.usage)} ${unit}}\n{meta|${isDiff ? '未分配/待核查差额（非线损）' : t.zone !== '—' ? t.zone : t.terminalId} · 占总表 ${shareStr}}`,
+              `{title|${shortName}}  {${isDiff ? 'valWarn' : 'val'}|${fmtVal(t.usage)} ${unit}}\n{meta|${metaLine}}`,
           },
         };
       }),
@@ -409,19 +428,21 @@ export function EnergySankeyChart({
         source: parentNode.id,
         target: t.id,
         value: Math.abs(t.usage ?? 0),
-        lineStyle: t.role === 'diff'
-          ? { color: '#FF7D00', opacity: 0.26, curveness: 0.52 }
-          : { color: 'gradient', opacity: 0.28, curveness: 0.52 },
+        lineStyle:
+          t.role === 'diff'
+            ? { color: SANKEY_DIFF_COLOR, opacity: 0.24, curveness: 0.5 }
+            : { color: 'gradient', opacity: 0.22, curveness: 0.5 },
       }));
 
-    // Apply clean proportional padding scaled by zoom (1 = fit canvas, >1 = zoom in, <1 = zoom out)
-    const clampedZoom = Math.min(1.5, Math.max(0.7, zoom));
-    const hPadPct = Math.max(3, Math.round(6 / clampedZoom));
-    const vPadPct = Math.max(4, Math.round(7 / clampedZoom));
+    // Clean outside-label margins so ZERO text overlaps flow ribbons at both 1440px and 1920px
+    const clampedZoom = Math.min(1.4, Math.max(0.75, zoom));
+    const leftPct = Math.max(14, Math.min(24, Math.round(19 / clampedZoom)));
+    const rightPct = Math.max(20, Math.min(32, Math.round(27 / clampedZoom)));
+    const vPadPct = Math.max(3, Math.round(5 / clampedZoom));
 
     chart.setOption(
       {
-        animationDuration: 420,
+        animationDuration: 360,
         animationEasing: 'cubicOut',
         tooltip: {
           trigger: 'item',
@@ -444,7 +465,7 @@ export function EnergySankeyChart({
               return [
                 `<div style="font-weight:600;margin-bottom:4px">${src?.name ?? ''} → ${tgt?.name ?? ''}</div>`,
                 `<div>计量流量：<b>${fmtVal(tgt?.usage)} ${unit}</b>（占总表 ${shareStr}）</div>`,
-                `<div style="margin-top:4px;color:#93C5FD;font-size:11px">点击节点查看计量点编码、状态与溯源详情</div>`,
+                `<div style="margin-top:4px;color:#93C5FD;font-size:11px">点击节点或流带查看计量溯源详情</div>`,
               ].join('');
             }
             const meta = p.name ? metaMap.get(p.name) : null;
@@ -462,52 +483,59 @@ export function EnergySankeyChart({
         series: [
           {
             type: 'sankey',
-            left: `${hPadPct}%`,
-            right: `${hPadPct}%`,
+            left: `${leftPct}%`,
+            right: `${rightPct}%`,
             top: `${vPadPct}%`,
             bottom: `${vPadPct}%`,
-            nodeWidth: Math.round(14 * Math.min(1.2, clampedZoom)),
-            nodeGap: Math.round(24 * clampedZoom),
+            nodeWidth: Math.round(16 * Math.min(1.15, clampedZoom)),
+            nodeGap: Math.round(30 * clampedZoom),
             nodeAlign: 'justify',
             layoutIterations: 0,
             draggable: false,
             orient: 'horizontal',
             emphasis: {
               focus: 'adjacency',
-              lineStyle: { opacity: 0.62 },
+              lineStyle: { opacity: 0.56 },
             },
             blur: {
-              itemStyle: { opacity: 0.35 },
-              lineStyle: { opacity: 0.08 },
+              itemStyle: { opacity: 0.32 },
+              lineStyle: { opacity: 0.06 },
             },
             label: {
               show: true,
               rich: {
                 title: {
                   color: '#0F172A',
-                  fontSize: 13,
+                  fontSize: 13.5,
                   fontWeight: 600,
-                  lineHeight: 20,
+                  lineHeight: 21,
                 },
                 val: {
-                  color: '#165DFF',
-                  fontSize: 13,
+                  color: '#1E40AF',
+                  fontSize: 13.5,
                   fontWeight: 600,
-                  lineHeight: 20,
+                  lineHeight: 21,
+                  fontFamily: 'Inter, system-ui, sans-serif',
+                },
+                valWarn: {
+                  color: '#B45309',
+                  fontSize: 13.5,
+                  fontWeight: 600,
+                  lineHeight: 21,
                   fontFamily: 'Inter, system-ui, sans-serif',
                 },
                 tag: {
-                  color: '#4E5969',
-                  backgroundColor: '#F2F3F5',
+                  color: '#475569',
+                  backgroundColor: '#F1F5F9',
                   borderRadius: 2,
-                  padding: [1, 5],
-                  fontSize: 10,
-                  lineHeight: 16,
+                  padding: [2, 6],
+                  fontSize: 11,
+                  lineHeight: 18,
                 },
                 meta: {
-                  color: '#64748B',
-                  fontSize: 11,
-                  lineHeight: 17,
+                  color: '#475569',
+                  fontSize: 12,
+                  lineHeight: 19,
                 },
               },
             },
